@@ -1,0 +1,7 @@
+# Build artifacts
+*.o
+DISTROY.so
+test_dsp
+build-arm64/
+.package-stage/
+DISTROY-module.tar.gz
