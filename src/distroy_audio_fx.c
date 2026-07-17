@@ -212,17 +212,20 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     int slot = parse_slot_key(key);
     if (slot < 0) return -1;
 
-    /* REVERTED (v0.4.2): back to plain numeric, type "float" in
-     * module.json. We tried three approaches to show the pedal name in
-     * this string (name-first text, number-first text, and this
-     * abbrev+percent format under type "mode") -- all eventually
-     * correlated with knobs freezing/not responding to turns on real
-     * hardware, even though some tested fine in the moment. Given
-     * repeated regressions in this exact spot, going back to the one
-     * combination that's been reliably solid (float + plain numeric,
-     * confirmed working in v0.2.2) rather than risk it again. Dynamic
-     * name display remains unsolved -- see README. */
-    return snprintf(buf, (size_t)buf_len, "%.4f", inst->left.slots[slot].knob);
+    const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
+    /* EXPERIMENT (v0.4.5): retrying name display, but with a specific
+     * fix to what actually broke it last time. The "number-first"
+     * attempt in v0.2.1 sent a PRE-MULTIPLIED percentage ("30% MUFF
+     * GAIN", pct = knob*100) -- the host parsed the leading "30" as the
+     * literal raw value in our declared 0.0-1.0 range, then multiplied
+     * it AGAIN by its own "%" unit formatter, producing garbage
+     * (3000%+). This time sending the raw 0.0-1.0 value un-multiplied,
+     * letting the host's own formatter do the x100 exactly once. If
+     * turning breaks again, revert this single snprintf line back to
+     * plain "%.4f" with no name -- see git history for the confirmed-
+     * reliable fallback (v0.4.3/v0.4.4). */
+    return snprintf(buf, (size_t)buf_len, "%.4f %s",
+                     inst->left.slots[slot].knob, info->abbrev);
 }
 
 static audio_fx_api_v2_t api = {
