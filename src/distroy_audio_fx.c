@@ -54,23 +54,36 @@
 #include "audio_fx_api_v2.h"
 #include "distroy_dsp.h"
 
-/* Diagnostic logging: writes directly to a file in the module's own
- * install directory, bypassing host->log() (which produced zero output
- * for EMAX_FX's equivalent attempt -- see that project's history).
- * Retrieve via SSH:
- *   ssh ableton@move.local cat /data/UserData/schwung/modules/audio_fx/DISTROY/debug.log
- * or via the Schwung Manager Files browser:
+/* Diagnostic logging: tries TWO locations, to directly test the theory
+ * below. A prior attempt (still in git history) wrote only to the
+ * module's own install directory
+ * (/data/UserData/schwung/modules/audio_fx/DISTROY/debug.log), same
+ * pattern that worked for EMAX_FX -- but produced zero output here
+ * despite create_instance() definitely running (the DSP audibly
+ * processes audio, RANDOMIZE works). Working theory: module install
+ * directories may now be read-only, silently failing fopen() (which
+ * our code already guards against -- no crash, just no file). Trying
+ * /data/UserData/Scratch/ as a second, plausibly-always-writable
+ * location. If Scratch has content but the module dir doesn't, that
+ * confirms the read-only theory. Retrieve via:
+ *   http://move.local:7700/files?path=/data/UserData/Scratch
  *   http://move.local:7700/files?path=/data/UserData/schwung/modules/audio_fx/DISTROY
  * Only set_param() calls and one-time lifecycle events are logged (not
  * get_param(), which is likely polled far more often for display
  * refresh and would flood the log). */
-#define DEBUG_LOG_PATH "/data/UserData/schwung/modules/audio_fx/DISTROY/debug.log"
+#define DEBUG_LOG_PATH_SCRATCH "/data/UserData/Scratch/distroy_debug.log"
+#define DEBUG_LOG_PATH_MODULE "/data/UserData/schwung/modules/audio_fx/DISTROY/debug.log"
 
 static void dbg_log(const char *msg) {
-    FILE *f = fopen(DEBUG_LOG_PATH, "a");
-    if (f) {
-        fprintf(f, "%s\n", msg);
-        fclose(f);
+    FILE *f1 = fopen(DEBUG_LOG_PATH_SCRATCH, "a");
+    if (f1) {
+        fprintf(f1, "%s\n", msg);
+        fclose(f1);
+    }
+    FILE *f2 = fopen(DEBUG_LOG_PATH_MODULE, "a");
+    if (f2) {
+        fprintf(f2, "%s\n", msg);
+        fclose(f2);
     }
 }
 
