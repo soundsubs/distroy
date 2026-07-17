@@ -13,19 +13,18 @@
  * state per channel to avoid stereo-collapse artifacts, same pattern
  * as EMAX_FX's per-channel EmaxVoice).
  *
- * DISPLAY/VALUE HISTORY (settled as of v0.4.2): tried three different
- * get_param() formats to show the pedal's name on-screen -- name-first
- * text ("MUFF GAIN 30%"), number-first text ("30% MUFF GAIN"), and
- * abbrev+percent under module.json type "mode" ("RAT 66%"). Each
+ * DISPLAY/VALUE HISTORY: tried three different get_param() formats to
+ * show the pedal's name on-screen -- name-first text, number-first
+ * text, and abbrev+percent under module.json type "mode". Each
  * appeared to work in isolated testing at some point, but knob turning
- * kept regressing to "frozen" on real hardware across sessions. Given
- * repeated regressions in this exact spot, settled on the one
- * combination that's been consistently reliable: module.json type
- * "float" + get_param() returning a plain numeric string. Dynamic
- * pedal-name display is abandoned as unsolved -- see README's open
- * questions. (The static module.json "label" field is just the bare
- * slot number, since which pedal occupies a slot is randomized at
- * runtime and can't be baked into a static label.)
+ * kept regressing to "frozen" on real hardware across sessions --
+ * including AFTER reverting to the "confirmed reliable" plain-numeric
+ * + type "float" combo in v0.4.2, which was reported still frozen.
+ * Since guessing at get_param() format changes hasn't reliably solved
+ * this, v0.4.3 adds real file-based diagnostic logging (see dbg_log()
+ * below, same approach that resolved EMAX_FX's on_midi mystery) to get
+ * actual evidence of what set_param() receives during a knob turn,
+ * rather than continuing to guess blind.
  *
  * On instantiation, AND whenever the "randomize" menu action fires,
  * all 8 slots get a new random pedal type AND new random knob/sub
@@ -54,6 +53,26 @@
 
 #include "audio_fx_api_v2.h"
 #include "distroy_dsp.h"
+
+/* Diagnostic logging: writes directly to a file in the module's own
+ * install directory, bypassing host->log() (which produced zero output
+ * for EMAX_FX's equivalent attempt -- see that project's history).
+ * Retrieve via SSH:
+ *   ssh ableton@move.local cat /data/UserData/schwung/modules/audio_fx/DISTROY/debug.log
+ * or via the Schwung Manager Files browser:
+ *   http://move.local:7700/files?path=/data/UserData/schwung/modules/audio_fx/DISTROY
+ * Only set_param() calls and one-time lifecycle events are logged (not
+ * get_param(), which is likely polled far more often for display
+ * refresh and would flood the log). */
+#define DEBUG_LOG_PATH "/data/UserData/schwung/modules/audio_fx/DISTROY/debug.log"
+
+static void dbg_log(const char *msg) {
+    FILE *f = fopen(DEBUG_LOG_PATH, "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
 
 typedef struct {
     DistroyChain left;
@@ -87,6 +106,8 @@ static void* create_instance(const char *module_dir, const char *config_json) {
 
     DistroyInstance *inst = (DistroyInstance*)calloc(1, sizeof(DistroyInstance));
     if (!inst) return NULL;
+
+    dbg_log("[DISTROY] create_instance called");
 
     inst->sample_rate = 44100.0;
     inst->randomize_counter = 0;
@@ -150,11 +171,21 @@ static void set_param(void *instance, const char *key, const char *val) {
     }
 
     int slot = parse_slot_key(key);
-    if (slot < 0) return;
+    if (slot < 0) {
+        char dbgbuf[128];
+        snprintf(dbgbuf, sizeof(dbgbuf), "[DISTROY] set_param: UNRECOGNIZED key=\"%s\" val=\"%s\"", key, val);
+        dbg_log(dbgbuf);
+        return;
+    }
 
     double v = clampd(atof(val), 0.0, 1.0);
     inst->left.slots[slot].knob = v;
     inst->right.slots[slot].knob = v;
+
+    char dbgbuf[128];
+    snprintf(dbgbuf, sizeof(dbgbuf), "[DISTROY] set_param: key=\"%s\" val=\"%s\" -> stored knob=%.4f (slot %d)",
+             key, val, v, slot + 1);
+    dbg_log(dbgbuf);
 }
 
 static int get_param(void *instance, const char *key, char *buf, int buf_len) {

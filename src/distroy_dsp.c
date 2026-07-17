@@ -17,10 +17,10 @@
  * ------------------------------------------------------------------- */
 static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_BOSS_OD]      = { "Boss OD",       "OD",     DISTROY_KNOB_WET_DRY },
-    [DISTROY_FUZZ]         = { "Fuzz",          "FUZZ",   DISTROY_KNOB_GAIN },
-    [DISTROY_METAL]        = { "Metal",         "METAL",  DISTROY_KNOB_GAIN },
+    [DISTROY_FUZZ]         = { "Fuzz",          "FUZZ",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_METAL]        = { "Metal",         "METAL",  DISTROY_KNOB_WET_DRY },
     [DISTROY_TUBESCREAMER] = { "Tubescreamer",  "TS9",    DISTROY_KNOB_WET_DRY },
-    [DISTROY_BIG_MUFF]     = { "Big Muff",      "MUFF",   DISTROY_KNOB_GAIN },
+    [DISTROY_BIG_MUFF]     = { "Big Muff",      "MUFF",   DISTROY_KNOB_WET_DRY },
     [DISTROY_SANSAMP]      = { "Sansamp",       "SANS",   DISTROY_KNOB_WET_DRY },
     [DISTROY_RAT]          = { "Rat",           "RAT",    DISTROY_KNOB_WET_DRY },
     [DISTROY_GEIGER_COUNTER] = { "Geiger Counter", "GEIGER", DISTROY_KNOB_WET_DRY },
@@ -542,15 +542,14 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
 
         double tone_rand = (double)xorshift_next(&state) / (double)UINT32_MAX;
         if (t == DISTROY_MOOG_LADDER || t == DISTROY_KORG_MS20) {
-            /* sub_tone is repurposed as Resonance for these two types
-             * (see distroy_block_process). Capped at 25% on
-             * randomization (lowered from an initial 50% cap in v0.4.1
-             * -- 50% still howled per direct listening feedback).
-             * (Manual control of resonance isn't exposed on a knob at
-             * all currently -- see README's open questions on
-             * sub-parameter submenu editing -- so this cap only
-             * matters at randomization time for now.) */
-            tone_rand *= 0.25;
+            /* SAFETY: resonance (repurposed sub_tone) is no longer
+             * randomized at all for these two types -- always 0. Even
+             * a 25% cap (v0.4.2) still howled loudly enough in some
+             * randomized chains to risk hurting ears/speakers. Live
+             * resonance control is planned for a future submenu (see
+             * README's open questions) where the user can dial it in
+             * deliberately; randomization just leaves it off. */
+            tone_rand = 0.0;
         }
         c->slots[i].sub_tone = tone_rand;
 

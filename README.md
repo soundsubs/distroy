@@ -10,15 +10,23 @@ the 8 knobs (knob 8 processes first, knob 1 processes last).
 | Pedal | Knob controls | Character |
 |---|---|---|
 | Boss OD | Wet/Dry | Symmetric soft clip + presence lift |
-| Fuzz | Gain | Asymmetric germanium-style clip, thinned bass |
-| Metal | Gain | Cascaded hard clip + scooped mids |
+| Fuzz | Wet/Dry | Asymmetric germanium-style clip, thinned bass |
+| Metal | Wet/Dry | Cascaded hard clip + scooped mids |
 | Tubescreamer | Wet/Dry | Mid-hump pre-emphasis + asymmetric soft clip |
-| Big Muff | Gain | Cascaded hard clip (sustain-heavy) + mild scoop |
+| Big Muff | Wet/Dry | Cascaded hard clip (sustain-heavy) + mild scoop |
 | Sansamp | Wet/Dry | Blended clean + saturated signal, warmth boost |
 | Rat | Wet/Dry | Hard clip + drive-linked darkening low-pass |
 | Geiger Counter | Wet/Dry | Aggressive asymmetric clip + quantization grit |
 | Moog Ladder | Cutoff | 4-pole (24dB/oct) resonant lowpass, self-saturating, with Drive |
 | Korg MS-20 | Cutoff | Resonant HPF -> resonant LPF in series, each self-saturating |
+
+**All 8 distortion-type pedals now use Wet/Dry (v0.4.3)** — previously
+Fuzz, Metal, and Big Muff used Gain instead. Every knob now defaults to
+50% and uniformly means "how much of the effect is blended in," rather
+than mixing Gain-mode and Wet/Dry-mode pedals with different knob
+semantics. The two filter types (Moog Ladder, Korg MS-20) keep Cutoff,
+since Wet/Dry isn't a meaningful concept for a filter's frequency
+control.
 
 **Why the filters were added:** a chain of 8 distortion stages tends to
 compound gain fast enough that everything collapses into a clipped
@@ -53,26 +61,21 @@ state as a second safety net. Verified via a dedicated worst-case test:
 max cutoff + max resonance + max drive simultaneously, sustained for a
 full second, stays finite.
 
-**Resonance cap on randomization:** even below the divergence threshold,
-high resonance on both filters reads as an unpleasant howl rather than a
-musical peak — per direct listening feedback (first capped at 50% in
-v0.4.1, then tightened further to 25% in v0.4.2 since 50% still howled).
-Randomized resonance (the repurposed `sub_tone` parameter) is capped at
-25% for Moog Ladder and Korg MS-20 specifically, verified across 1000
-randomized chains.
+**Resonance disabled on randomization (v0.4.3):** even a 25% cap
+(v0.4.2) still howled loudly enough in some randomized chains to risk
+hurting ears/speakers. Resonance is no longer randomized at all for
+Moog Ladder or Korg MS-20 — always exactly 0 on chain load. Live
+resonance control is planned for a future submenu (see Open Questions)
+where it can be dialed in deliberately instead.
 
 **No duplicate pedal types in a chain (v0.4.1):** randomization now
 shuffles all 10 types and takes the first 8 (Fisher-Yates), guaranteeing
 every slot in a chain gets a distinct pedal — no more "two Boss ODs in
 a row." Verified across 1000 randomized chains.
 
-**Knob mode design note:** the spec calls for knobs to default to a
-"wet/dry amount," with some pedals using Gain instead. I split this as:
-Gain for the classic "always fully driven" pedals where drive amount
-itself is the character (Fuzz, Metal, Big Muff), Wet/Dry for pedals
-more commonly used as blended boosts/texture (the other five). This
-split wasn't fully specified in the request — easy to rebalance if a
-different split is wanted.
+**Knob mode design note:** originally split Gain vs Wet/Dry across the 8
+distortion pedals (see git history), but as of v0.4.3 all 8 use Wet/Dry
+uniformly — see the pedal roster table above.
 
 **Modeling note:** these are characteristic circuit-topology
 approximations (soft/hard clipping curves + coloration filters tuned to
@@ -143,15 +146,22 @@ and 1.0) produce finite output.
    declared 0.0-1.0 range as a scale factor) and re-formats/displays
    that number independently, always discarding any appended text,
    regardless of param `type` (`float` vs `mode`) or number/text
-   ordering. Each approach also correlated with knob turning
-   regressing to "frozen" on real hardware at some point, even when it
-   tested fine in the moment — as of v0.4.2, settled permanently on
-   `type: "float"` + plain numeric `get_param()`, the one combination
-   that's stayed reliably solid, and stopped experimenting further in
-   this area. Dynamically showing the pedal's name — and by extension,
+   ordering. Dynamically showing the pedal's name — and by extension,
    live-editing the Drive/Tone/Level sub-parameters via a submenu —
-   needs a different, unconfirmed API surface (see previous section).
-   Worth asking on the Schwung Discord rather than guessing again.
+   needs a different, unconfirmed API surface. Worth asking on the
+   Schwung Discord.
+2. **Knob turning intermittently not registering.** Reported multiple
+   times across versions, including after reverting to the
+   configuration that tested fine in prior sessions (`type: "float"` +
+   plain numeric `get_param()`), suggesting this isn't purely a
+   get_param format issue. v0.4.3 adds file-based diagnostic logging
+   (`set_param()` calls, same technique that resolved EMAX_FX's
+   `on_midi` mystery) to gather real evidence instead of guessing at
+   more format changes. Retrieve `debug.log` via SSH or the Schwung
+   Manager Files browser at
+   `move.local:7700/files?path=/data/UserData/schwung/modules/audio_fx/DISTROY`
+   after turning a few knobs, to see whether `set_param()` is even
+   being called and with what values.
 2. **"Shift+Touch a knob to pick a different pedal for that slot."**
    No confirmed API for a distinct shift+touch gesture reaching
    third-party `audio_fx` plugins. All 8 knobs are already assigned
