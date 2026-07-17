@@ -53,11 +53,12 @@ state as a second safety net. Verified via a dedicated worst-case test:
 max cutoff + max resonance + max drive simultaneously, sustained for a
 full second, stays finite.
 
-**Resonance cap on randomization (v0.4.1):** even below the divergence
-threshold, high resonance on both filters reads as an unpleasant howl
-rather than a musical peak — per direct listening feedback. Randomized
-resonance (the repurposed `sub_tone` parameter) is now capped at 50%
-for Moog Ladder and Korg MS-20 specifically, verified across 1000
+**Resonance cap on randomization:** even below the divergence threshold,
+high resonance on both filters reads as an unpleasant howl rather than a
+musical peak — per direct listening feedback (first capped at 50% in
+v0.4.1, then tightened further to 25% in v0.4.2 since 50% still howled).
+Randomized resonance (the repurposed `sub_tone` parameter) is capped at
+25% for Moog Ladder and Korg MS-20 specifically, verified across 1000
 randomized chains.
 
 **No duplicate pedal types in a chain (v0.4.1):** randomization now
@@ -142,11 +143,15 @@ and 1.0) produce finite output.
    declared 0.0-1.0 range as a scale factor) and re-formats/displays
    that number independently, always discarding any appended text,
    regardless of param `type` (`float` vs `mode`) or number/text
-   ordering. `get_param()` now returns a plain numeric value. Dynamically
-   showing the pedal's name — and by extension, live-editing the
-   Drive/Tone/Level sub-parameters via a submenu — needs a different,
-   unconfirmed API surface (see previous section). Worth asking on the
-   Schwung Discord rather than guessing further.
+   ordering. Each approach also correlated with knob turning
+   regressing to "frozen" on real hardware at some point, even when it
+   tested fine in the moment — as of v0.4.2, settled permanently on
+   `type: "float"` + plain numeric `get_param()`, the one combination
+   that's stayed reliably solid, and stopped experimenting further in
+   this area. Dynamically showing the pedal's name — and by extension,
+   live-editing the Drive/Tone/Level sub-parameters via a submenu —
+   needs a different, unconfirmed API surface (see previous section).
+   Worth asking on the Schwung Discord rather than guessing again.
 2. **"Shift+Touch a knob to pick a different pedal for that slot."**
    No confirmed API for a distinct shift+touch gesture reaching
    third-party `audio_fx` plugins. All 8 knobs are already assigned

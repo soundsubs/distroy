@@ -543,15 +543,14 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
         double tone_rand = (double)xorshift_next(&state) / (double)UINT32_MAX;
         if (t == DISTROY_MOOG_LADDER || t == DISTROY_KORG_MS20) {
             /* sub_tone is repurposed as Resonance for these two types
-             * (see distroy_block_process). Capped at 50% on
-             * randomization -- above that both filters self-oscillate
-             * in a way that reads as an unpleasant howl rather than a
-             * musical resonance peak, per direct listening feedback.
+             * (see distroy_block_process). Capped at 25% on
+             * randomization (lowered from an initial 50% cap in v0.4.1
+             * -- 50% still howled per direct listening feedback).
              * (Manual control of resonance isn't exposed on a knob at
              * all currently -- see README's open questions on
              * sub-parameter submenu editing -- so this cap only
              * matters at randomization time for now.) */
-            tone_rand *= 0.5;
+            tone_rand *= 0.25;
         }
         c->slots[i].sub_tone = tone_rand;
 

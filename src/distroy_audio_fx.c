@@ -13,30 +13,31 @@
  * state per channel to avoid stereo-collapse artifacts, same pattern
  * as EMAX_FX's per-channel EmaxVoice).
  *
- * CONFIRMED ON REAL HARDWARE: get_param()'s returned string affects
- * what Schwung displays -- but v0.2.0's "MUFF GAIN 30%" format (name
- * first) broke knob turning entirely, while the display itself worked.
- * Working theory: the host parses this string back into a float (e.g.
- * atof()) to track the value while turning, and a leading non-numeric
- * character makes that parse fail. v0.2.1 puts the number first
- * ("30% MUFF GAIN") to stay parseable while keeping the descriptive
- * text. (The static module.json "label" field was separately shortened
- * to bare slot numbers, since which pedal occupies a slot is
- * randomized at runtime and can't be baked into a static label.)
+ * DISPLAY/VALUE HISTORY (settled as of v0.4.2): tried three different
+ * get_param() formats to show the pedal's name on-screen -- name-first
+ * text ("MUFF GAIN 30%"), number-first text ("30% MUFF GAIN"), and
+ * abbrev+percent under module.json type "mode" ("RAT 66%"). Each
+ * appeared to work in isolated testing at some point, but knob turning
+ * kept regressing to "frozen" on real hardware across sessions. Given
+ * repeated regressions in this exact spot, settled on the one
+ * combination that's been consistently reliable: module.json type
+ * "float" + get_param() returning a plain numeric string. Dynamic
+ * pedal-name display is abandoned as unsolved -- see README's open
+ * questions. (The static module.json "label" field is just the bare
+ * slot number, since which pedal occupies a slot is randomized at
+ * runtime and can't be baked into a static label.)
  *
  * On instantiation, AND whenever the "randomize" menu action fires,
- * all 8 slots get a new random pedal type AND a new random knob value
- * (distroy_chain_randomize_all()) -- both channels share the same seed
- * so left/right always agree on pedal identity and knob value.
+ * all 8 slots get a new random pedal type AND new random knob/sub
+ * values (distroy_chain_randomize_all()) -- both channels share the
+ * same seed so left/right always agree on pedal identity and values.
  *
- * RANDOMIZE MENU ACTION (experimental): exposed as a 9th param
+ * RANDOMIZE MENU ACTION (confirmed working): exposed as a 9th param
  * ("randomize", enum ["-", "Go!"]) that is NOT listed in module.json's
- * "knobs" array (which only lists the 8 slot params) -- the working
- * theory, unconfirmed, is that params outside "knobs" surface in the
- * module's own settings menu (jog-wheel navigable) rather than getting
- * a physical knob. This mirrors the "Swap Module" menu item noticed on
- * other modules during EMAX_FX development. Needs on-device
- * confirmation.
+ * "knobs" array (which only lists the 8 slot params) -- confirmed on
+ * real hardware that params outside "knobs" surface in the module's
+ * own settings menu (jog-wheel navigable) rather than getting a
+ * physical knob, and selecting "Go!" correctly re-randomizes the chain.
  *
  * STILL OPEN (unconfirmed):
  *   - "Shift+Touch to pick a different pedal for that slot" -- no
@@ -167,18 +168,17 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     int slot = parse_slot_key(key);
     if (slot < 0) return -1;
 
-    const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
-    int pct = (int)lround(inst->left.slots[slot].knob * 100.0);
-    /* EXPERIMENT (v0.2.3): module.json's declared type changed from
-     * "float" to "mode" for slot params, on the theory that "mode" may
-     * make the host track knob position via its own internal state
-     * rather than re-parsing this returned string as the literal value
-     * (which is what broke things under "float" -- see REVERTED comment
-     * in git history for v0.2.0/0.2.1's failed attempts). If turning
-     * still doesn't work correctly under "mode", this needs a different
-     * approach entirely (possibly requires an API surface not present
-     * in our hand-transcribed audio_fx_api_v2.h -- see README). */
-    return snprintf(buf, (size_t)buf_len, "%s %d%%", info->abbrev, pct);
+    /* REVERTED (v0.4.2): back to plain numeric, type "float" in
+     * module.json. We tried three approaches to show the pedal name in
+     * this string (name-first text, number-first text, and this
+     * abbrev+percent format under type "mode") -- all eventually
+     * correlated with knobs freezing/not responding to turns on real
+     * hardware, even though some tested fine in the moment. Given
+     * repeated regressions in this exact spot, going back to the one
+     * combination that's been reliably solid (float + plain numeric,
+     * confirmed working in v0.2.2) rather than risk it again. Dynamic
+     * name display remains unsolved -- see README. */
+    return snprintf(buf, (size_t)buf_len, "%.4f", inst->left.slots[slot].knob);
 }
 
 static audio_fx_api_v2_t api = {

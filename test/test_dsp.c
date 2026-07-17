@@ -171,14 +171,14 @@ int main(void) {
         distroy_chain_randomize_all(&c4, seed);
         for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
             DistroyType t = c4.slots[i].type;
-            if ((t == DISTROY_MOOG_LADDER || t == DISTROY_KORG_MS20) && c4.slots[i].sub_tone > 0.5) {
+            if ((t == DISTROY_MOOG_LADDER || t == DISTROY_KORG_MS20) && c4.slots[i].sub_tone > 0.25) {
                 printf("Resonance cap violated: %s sub_tone=%.4f seed=%u\n",
                        distroy_type_info(t)->name, c4.slots[i].sub_tone, seed);
                 cap_violated = 1;
             }
         }
     }
-    printf("Moog/Korg resonance cap check: %s\n", cap_violated ? "FAILED" : "PASSED (never exceeded 50%% in 1000 chains)");
+    printf("Moog/Korg resonance cap check: %s\n", cap_violated ? "FAILED" : "PASSED (never exceeded 25%% in 1000 chains)");
     if (cap_violated) all_ok = 0;
 
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
