@@ -1,7 +1,7 @@
 {
     "id": "DISTROY",
     "name": "DISTROY",
-    "version": "0.2.1",
+    "version": "0.2.2",
     "abbrev": "DSTRY",
     "description": "8-slot chain of modeled distortion/overdrive pedals (Boss OD, Fuzz, Metal, Tubescreamer, Big Muff, Sansamp, Rat, Geiger Counter) -- random pedal chain + random params on load, signal flows right to left across the 8 knobs",
     "author": "soundsubs",
@@ -18,81 +18,92 @@
                     "params": [
                         {
                             "key": "slot0",
-                            "label": "1",
+                            "label": "Slot 1",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot1",
-                            "label": "2",
+                            "label": "Slot 2",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot2",
-                            "label": "3",
+                            "label": "Slot 3",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot3",
-                            "label": "4",
+                            "label": "Slot 4",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot4",
-                            "label": "5",
+                            "label": "Slot 5",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot5",
-                            "label": "6",
+                            "label": "Slot 6",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot6",
-                            "label": "7",
+                            "label": "Slot 7",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "slot7",
-                            "label": "8",
+                            "label": "Slot 8",
                             "type": "float",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
-                            "step": 0.01
+                            "step": 0.01,
+                            "unit": "%"
                         },
                         {
                             "key": "randomize",
                             "label": "Randomize",
                             "type": "enum",
-                            "options": ["-", "Go!"],
+                            "options": [
+                                "-",
+                                "Go!"
+                            ],
                             "default": "-"
                         }
                     ],

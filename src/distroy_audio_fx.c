@@ -165,17 +165,22 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     int slot = parse_slot_key(key);
     if (slot < 0) return -1;
 
-    const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
-    int pct = (int)lround(inst->left.slots[slot].knob * 100.0);
-    /* NUMBER FIRST: v0.2.0 returned "MUFF GAIN 30%" (name first) and
-     * knob turning broke -- most likely because the host parses this
-     * string back into a float (e.g. atof()) to track the live value
-     * while turning, and atof() reads from the start of the string, so
-     * a string starting with letters parses as 0 and turning stalls.
-     * Putting the number first keeps it parseable while still showing
-     * the descriptive text for the touch-display use case. */
-    return snprintf(buf, (size_t)buf_len, "%d%% %s %s",
-                     pct, info->abbrev, distroy_knob_mode_label(info->knob_mode));
+    /* REVERTED: v0.2.0/0.2.1 tried embedding descriptive text in this
+     * string ("MUFF GAIN 30%", then "30% MUFF GAIN"). Both were wrong.
+     * Confirmed on real hardware: the host does NOT display this string
+     * verbatim -- it parses the leading number as the literal stored
+     * parameter value (not respecting our declared 0.0-1.0 range as a
+     * scale factor) and re-formats/displays THAT number independently
+     * using its own unit/percent rules, discarding any trailing text.
+     * "30% MUFF GAIN" got parsed as the raw value 30 (not 0.30), then
+     * re-formatted as a huge bogus percentage (2300%/5300%/5800%).
+     * Reverting to a plain, correctly-scaled numeric value restores
+     * correct knob behavior. Dynamically showing the pedal's name is
+     * still an OPEN, unsolved question -- no confirmed mechanism found
+     * yet, same status as EMAX_FX's on_midi mystery. Not guessing
+     * further here since the last two guesses both caused real
+     * regressions. */
+    return snprintf(buf, (size_t)buf_len, "%.4f", inst->left.slots[slot].knob);
 }
 
 static audio_fx_api_v2_t api = {
