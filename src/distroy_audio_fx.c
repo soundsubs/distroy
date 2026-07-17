@@ -212,20 +212,17 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     int slot = parse_slot_key(key);
     if (slot < 0) return -1;
 
-    const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
-    /* EXPERIMENT (v0.4.5): retrying name display, but with a specific
-     * fix to what actually broke it last time. The "number-first"
-     * attempt in v0.2.1 sent a PRE-MULTIPLIED percentage ("30% MUFF
-     * GAIN", pct = knob*100) -- the host parsed the leading "30" as the
-     * literal raw value in our declared 0.0-1.0 range, then multiplied
-     * it AGAIN by its own "%" unit formatter, producing garbage
-     * (3000%+). This time sending the raw 0.0-1.0 value un-multiplied,
-     * letting the host's own formatter do the x100 exactly once. If
-     * turning breaks again, revert this single snprintf line back to
-     * plain "%.4f" with no name -- see git history for the confirmed-
-     * reliable fallback (v0.4.3/v0.4.4). */
-    return snprintf(buf, (size_t)buf_len, "%.4f %s",
-                     inst->left.slots[slot].knob, info->abbrev);
+    /* CONFIRMED CLOSED (v0.4.6): name display via get_param() is not
+     * achievable, full stop. Tested exhaustively: name-first text,
+     * number-first text with wrong scaling, and now number-first text
+     * with CORRECT scaling (v0.4.5) -- turning worked fine, but the
+     * pedal name still never appeared. The host reads only the leading
+     * parseable number from this string and discards everything after
+     * it, unconditionally, regardless of scale correctness. Not
+     * retrying this again -- see README's open questions for what
+     * would actually be needed (a different API surface for dynamic
+     * display names, unconfirmed to exist). */
+    return snprintf(buf, (size_t)buf_len, "%.4f", inst->left.slots[slot].knob);
 }
 
 static audio_fx_api_v2_t api = {

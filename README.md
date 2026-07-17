@@ -140,36 +140,36 @@ and 1.0) produce finite output.
 ## Open questions (need on-device testing / real API docs)
 
 1. **"Touching a knob (without turning) shows the pedal's name."**
-   **Confirmed NOT achievable via `get_param()`'s returned string** —
-   tested three approaches on real hardware, all consistent: the host
-   parses the leading number as the literal stored value (not our
-   declared 0.0-1.0 range as a scale factor) and re-formats/displays
-   that number independently, always discarding any appended text,
-   regardless of param `type` (`float` vs `mode`) or number/text
-   ordering. Dynamically showing the pedal's name — and by extension,
-   live-editing the Drive/Tone/Level sub-parameters via a submenu —
-   needs a different, unconfirmed API surface. Worth asking on the
-   Schwung Discord.
-2. **Knob turning intermittently not registering.** Reported multiple
-   times across versions, including after reverting to the
-   configuration that tested fine in prior sessions (`type: "float"` +
-   plain numeric `get_param()`), suggesting this isn't purely a
-   get_param format issue. v0.4.3 adds file-based diagnostic logging
-   (`set_param()` calls, same technique that resolved EMAX_FX's
-   `on_midi` mystery) to gather real evidence instead of guessing at
-   more format changes. Retrieve `debug.log` via SSH or the Schwung
-   Manager Files browser at
-   `move.local:7700/files?path=/data/UserData/schwung/modules/audio_fx/DISTROY`
-   after turning a few knobs, to see whether `set_param()` is even
-   being called and with what values.
-2. **"Shift+Touch a knob to pick a different pedal for that slot."**
+   **CONFIRMED CLOSED as of v0.4.6 — not achievable via `get_param()`.**
+   Tested exhaustively across many versions: name-first text,
+   number-first text with incorrect scaling, and number-first text with
+   *correct* scaling (v0.4.5, ruling out the double-multiply theory
+   specifically). In every case the host reads only the leading
+   parseable number and unconditionally discards everything after it —
+   turning worked correctly under the correctly-scaled attempt, but the
+   name still never appeared. Not retrying this again. Static `"Slot
+   N"` labels are the final state. Dynamically showing the pedal's name
+   — and by extension, live-editing the Drive/Tone/Level sub-parameters
+   via a submenu — would need a different, unconfirmed API surface.
+   Worth asking on the Schwung Discord if this is still wanted.
+2. **Knob turning — RESOLVED, cause uncertain.** Was intermittently not
+   registering across several versions, including after reverting to a
+   configuration that had tested fine previously — suggesting it wasn't
+   purely a `get_param` format issue. Started working reliably as of
+   v0.4.4, whose only actual code change was adding diagnostic logging
+   (unrelated to `set_param`/`get_param` logic). Best guess: repeated
+   Uninstall→reinstall cycles eventually cleared stale cached UI state
+   on the device itself (left over from earlier experiments with
+   `type: "mode"`), rather than anything in v0.4.4's code specifically.
+   Not fully confirmed, but turning has been solid since.
+3. **"Shift+Touch a knob to pick a different pedal for that slot."**
    No confirmed API for a distinct shift+touch gesture reaching
    third-party `audio_fx` plugins. All 8 knobs are already assigned
    (one per slot), so this would need a secondary access mechanism not
    yet identified. Possibly related to the "Swap Module" / preset-picker
    behavior noticed on EMAX_FX (a host-level UI mechanism, not something
    plugins directly implement).
-3. **RANDOMIZE menu action — confirmed working.** Exposed as a 9th
+4. **RANDOMIZE menu action — confirmed working.** Exposed as a 9th
    param not listed in `module.json`'s `"knobs"` array; it shows up in
    the module's own jog-wheel-navigable menu and correctly re-rolls the
    whole chain. This is genuinely useful evidence for #1/#2 above: params
