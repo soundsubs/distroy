@@ -53,6 +53,18 @@ state as a second safety net. Verified via a dedicated worst-case test:
 max cutoff + max resonance + max drive simultaneously, sustained for a
 full second, stays finite.
 
+**Resonance cap on randomization (v0.4.1):** even below the divergence
+threshold, high resonance on both filters reads as an unpleasant howl
+rather than a musical peak — per direct listening feedback. Randomized
+resonance (the repurposed `sub_tone` parameter) is now capped at 50%
+for Moog Ladder and Korg MS-20 specifically, verified across 1000
+randomized chains.
+
+**No duplicate pedal types in a chain (v0.4.1):** randomization now
+shuffles all 10 types and takes the first 8 (Fisher-Yates), guaranteeing
+every slot in a chain gets a distinct pedal — no more "two Boss ODs in
+a row." Verified across 1000 randomized chains.
+
 **Knob mode design note:** the spec calls for knobs to default to a
 "wet/dry amount," with some pedals using Gain instead. I split this as:
 Gain for the classic "always fully driven" pedals where drive amount

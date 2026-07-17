@@ -498,24 +498,63 @@ static unsigned int xorshift_next(unsigned int *state) {
     return s;
 }
 
+/* Shuffles all DISTROY_TYPE_COUNT type indices (Fisher-Yates) into
+ * `out`, writing the first `count` entries. Guarantees no duplicate
+ * pedal type among the slots -- requires DISTROY_TYPE_COUNT >= count
+ * (10 >= 8, currently true; if more slots than types ever existed this
+ * would need to wrap/repeat, not attempted here since it's not the
+ * current situation). */
+static void shuffle_distinct_types(DistroyType *out, int count, unsigned int *state) {
+    DistroyType pool[DISTROY_TYPE_COUNT];
+    for (int i = 0; i < DISTROY_TYPE_COUNT; i++) pool[i] = (DistroyType)i;
+    for (int i = DISTROY_TYPE_COUNT - 1; i > 0; i--) {
+        unsigned int j = xorshift_next(state) % (unsigned int)(i + 1);
+        DistroyType tmp = pool[i];
+        pool[i] = pool[j];
+        pool[j] = tmp;
+    }
+    for (int i = 0; i < count && i < DISTROY_TYPE_COUNT; i++) {
+        out[i] = pool[i];
+    }
+}
+
 void distroy_chain_randomize(DistroyChain *c, unsigned int seed) {
     unsigned int state = seed;
+    DistroyType types[DISTROY_NUM_SLOTS];
+    shuffle_distinct_types(types, DISTROY_NUM_SLOTS, &state);
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
-        DistroyType t = (DistroyType)(xorshift_next(&state) % DISTROY_TYPE_COUNT);
-        distroy_block_set_type(&c->slots[i], t);
+        distroy_block_set_type(&c->slots[i], types[i]);
     }
 }
 
 void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
     unsigned int state = seed;
+    DistroyType types[DISTROY_NUM_SLOTS];
+    shuffle_distinct_types(types, DISTROY_NUM_SLOTS, &state);
+
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
-        DistroyType t = (DistroyType)(xorshift_next(&state) % DISTROY_TYPE_COUNT);
+        DistroyType t = types[i];
         distroy_block_set_type(&c->slots[i], t);
         /* xorshift_next returns a full-range unsigned int -- scale to
          * 0.0-1.0 */
         c->slots[i].knob = (double)xorshift_next(&state) / (double)UINT32_MAX;
         c->slots[i].sub_drive = (double)xorshift_next(&state) / (double)UINT32_MAX;
-        c->slots[i].sub_tone = (double)xorshift_next(&state) / (double)UINT32_MAX;
+
+        double tone_rand = (double)xorshift_next(&state) / (double)UINT32_MAX;
+        if (t == DISTROY_MOOG_LADDER || t == DISTROY_KORG_MS20) {
+            /* sub_tone is repurposed as Resonance for these two types
+             * (see distroy_block_process). Capped at 50% on
+             * randomization -- above that both filters self-oscillate
+             * in a way that reads as an unpleasant howl rather than a
+             * musical resonance peak, per direct listening feedback.
+             * (Manual control of resonance isn't exposed on a knob at
+             * all currently -- see README's open questions on
+             * sub-parameter submenu editing -- so this cap only
+             * matters at randomization time for now.) */
+            tone_rand *= 0.5;
+        }
+        c->slots[i].sub_tone = tone_rand;
+
         c->slots[i].sub_level = (double)xorshift_next(&state) / (double)UINT32_MAX;
         c->slots[i].tone_stage.tone = c->slots[i].sub_tone;
     }

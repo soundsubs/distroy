@@ -144,6 +144,43 @@ int main(void) {
         printf("  %-14s: %d\n", distroy_type_info((DistroyType)t)->name, type_counts[t]);
     }
 
+    printf("\n=== No-duplicate-types check (1000 seeds) ===\n");
+    int dup_found = 0;
+    for (unsigned int seed = 1; seed <= 1000; seed++) {
+        DistroyChain c3;
+        distroy_chain_init(&c3, 44100.0);
+        distroy_chain_randomize_all(&c3, seed);
+        int seen[DISTROY_TYPE_COUNT] = {0};
+        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+            if (seen[c3.slots[i].type]) {
+                printf("DUPLICATE type %s found in chain seed=%u\n",
+                       distroy_type_info(c3.slots[i].type)->name, seed);
+                dup_found = 1;
+            }
+            seen[c3.slots[i].type] = 1;
+        }
+    }
+    printf("No-duplicate-types check: %s\n", dup_found ? "FAILED (duplicates found)" : "PASSED (no duplicates in 1000 chains)");
+    if (dup_found) all_ok = 0;
+
+    printf("\n=== Moog/Korg resonance cap check (1000 seeds) ===\n");
+    int cap_violated = 0;
+    for (unsigned int seed = 1; seed <= 1000; seed++) {
+        DistroyChain c4;
+        distroy_chain_init(&c4, 44100.0);
+        distroy_chain_randomize_all(&c4, seed);
+        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+            DistroyType t = c4.slots[i].type;
+            if ((t == DISTROY_MOOG_LADDER || t == DISTROY_KORG_MS20) && c4.slots[i].sub_tone > 0.5) {
+                printf("Resonance cap violated: %s sub_tone=%.4f seed=%u\n",
+                       distroy_type_info(t)->name, c4.slots[i].sub_tone, seed);
+                cap_violated = 1;
+            }
+        }
+    }
+    printf("Moog/Korg resonance cap check: %s\n", cap_violated ? "FAILED" : "PASSED (never exceeded 50%% in 1000 chains)");
+    if (cap_violated) all_ok = 0;
+
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
     return all_ok ? 0 : 1;
 }
