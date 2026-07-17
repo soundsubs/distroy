@@ -13,28 +13,32 @@
  * state per channel to avoid stereo-collapse artifacts, same pattern
  * as EMAX_FX's per-channel EmaxVoice).
  *
- * On instantiation, all 8 slots are randomly assigned a pedal type
- * (see distroy_chain_randomize() in distroy_dsp.c) -- both channels'
- * chains are randomized with the SAME seed so left/right always agree
- * on which pedal occupies which slot (only filter state differs
- * per-channel, never pedal identity).
+ * CONFIRMED ON REAL HARDWARE: get_param()'s returned string IS what
+ * Schwung displays when adjusting a knob -- turning it into
+ * "MUFF GAIN 30%" style formatting works. (The static module.json
+ * "label" field may still prefix this on-screen -- labels were
+ * shortened to bare slot numbers to minimize redundancy, since which
+ * pedal occupies a slot is randomized at runtime and can't be baked
+ * into a static label.)
  *
- * KNOWN OPEN QUESTIONS (need on-device testing, same as EMAX_FX's
- * on_midi investigation):
- *   - "Touching a knob shows the pedal's name" -- module.json's per-
- *     param "label" field is static at declare-time, but which pedal
- *     occupies a slot is randomized at runtime. get_param() currently
- *     returns just the plain numeric value (safe default matching
- *     standard knob-arc display). Whether Schwung has any mechanism
- *     for a plugin to override a param's displayed name/label
- *     dynamically is unconfirmed.
+ * On instantiation, AND whenever the "randomize" menu action fires,
+ * all 8 slots get a new random pedal type AND a new random knob value
+ * (distroy_chain_randomize_all()) -- both channels share the same seed
+ * so left/right always agree on pedal identity and knob value.
+ *
+ * RANDOMIZE MENU ACTION (experimental): exposed as a 9th param
+ * ("randomize", enum ["-", "Go!"]) that is NOT listed in module.json's
+ * "knobs" array (which only lists the 8 slot params) -- the working
+ * theory, unconfirmed, is that params outside "knobs" surface in the
+ * module's own settings menu (jog-wheel navigable) rather than getting
+ * a physical knob. This mirrors the "Swap Module" menu item noticed on
+ * other modules during EMAX_FX development. Needs on-device
+ * confirmation.
+ *
+ * STILL OPEN (unconfirmed):
  *   - "Shift+Touch to pick a different pedal for that slot" -- no
  *     confirmed API for a distinct shift+touch gesture reaching
- *     third-party audio_fx plugins. All 8 knobs are already spoken for
- *     (one per slot), so this would need a secondary access mechanism
- *     we haven't identified yet.
- * Both are left as future work pending real-hardware testing, same
- * approach as EMAX_FX.
+ *     third-party audio_fx plugins.
  */
 
 #include <stdint.h>
@@ -51,12 +55,26 @@ typedef struct {
     DistroyChain left;
     DistroyChain right;
     double sample_rate;
+    unsigned int randomize_counter; /* mixed into the seed so repeated
+                                        triggers within the same second
+                                        still produce different results */
 } DistroyInstance;
 
 static double clampd(double x, double lo, double hi) {
     if (x < lo) return lo;
     if (x > hi) return hi;
     return x;
+}
+
+static unsigned int make_seed(DistroyInstance *inst) {
+    return (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)inst
+           ^ (inst->randomize_counter++ * 2654435761u); /* Knuth multiplicative hash mix */
+}
+
+static void randomize_everything(DistroyInstance *inst) {
+    unsigned int seed = make_seed(inst);
+    distroy_chain_randomize_all(&inst->left, seed);
+    distroy_chain_randomize_all(&inst->right, seed);
 }
 
 static void* create_instance(const char *module_dir, const char *config_json) {
@@ -67,19 +85,12 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     if (!inst) return NULL;
 
     inst->sample_rate = 44100.0;
+    inst->randomize_counter = 0;
     distroy_chain_init(&inst->left, inst->sample_rate);
     distroy_chain_init(&inst->right, inst->sample_rate);
 
-    /* Random 8-pedal chain on instantiation, per spec. Same seed for
-     * both channels so they agree on pedal identity per slot. */
-    unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)inst;
-    distroy_chain_randomize(&inst->left, seed);
-    distroy_chain_randomize(&inst->right, seed);
-
-    for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
-        inst->left.slots[i].knob = 0.5;
-        inst->right.slots[i].knob = 0.5;
-    }
+    /* Random 8-pedal chain AND random knob values on instantiation. */
+    randomize_everything(inst);
 
     return inst;
 }
@@ -122,6 +133,16 @@ static void set_param(void *instance, const char *key, const char *val) {
     DistroyInstance *inst = (DistroyInstance*)instance;
     if (!inst || !key || !val) return;
 
+    if (strcmp(key, "randomize") == 0) {
+        /* Momentary trigger: any selection other than "-" fires it.
+         * get_param() always reports back "-" so the UI springs back
+         * rather than showing "Go!" as a persisted state. */
+        if (strcmp(val, "-") != 0) {
+            randomize_everything(inst);
+        }
+        return;
+    }
+
     int slot = parse_slot_key(key);
     if (slot < 0) return;
 
@@ -134,12 +155,19 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     DistroyInstance *inst = (DistroyInstance*)instance;
     if (!inst || !key || !buf || buf_len <= 0) return -1;
 
+    if (strcmp(key, "randomize") == 0) {
+        return snprintf(buf, (size_t)buf_len, "-");
+    }
+
     int slot = parse_slot_key(key);
     if (slot < 0) return -1;
 
-    /* Plain numeric value -- see header comment re: the open question
-     * about dynamically showing the pedal name on knob touch. */
-    return snprintf(buf, (size_t)buf_len, "%.4f", inst->left.slots[slot].knob);
+    const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
+    int pct = (int)lround(inst->left.slots[slot].knob * 100.0);
+    /* Confirmed on real hardware: this returned string is what
+     * Schwung displays when adjusting the knob. */
+    return snprintf(buf, (size_t)buf_len, "%s %s %d%%",
+                     info->abbrev, distroy_knob_mode_label(info->knob_mode), pct);
 }
 
 static audio_fx_api_v2_t api = {

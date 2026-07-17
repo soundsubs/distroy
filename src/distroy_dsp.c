@@ -16,19 +16,23 @@
  * different split is wanted.
  * ------------------------------------------------------------------- */
 static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
-    [DISTROY_BOSS_OD]      = { "Boss OD",       DISTROY_KNOB_WET_DRY },
-    [DISTROY_FUZZ]         = { "Fuzz",          DISTROY_KNOB_GAIN },
-    [DISTROY_METAL]        = { "Metal",         DISTROY_KNOB_GAIN },
-    [DISTROY_TUBESCREAMER] = { "Tubescreamer",  DISTROY_KNOB_WET_DRY },
-    [DISTROY_BIG_MUFF]     = { "Big Muff",      DISTROY_KNOB_GAIN },
-    [DISTROY_SANSAMP]      = { "Sansamp",       DISTROY_KNOB_WET_DRY },
-    [DISTROY_RAT]          = { "Rat",           DISTROY_KNOB_WET_DRY },
-    [DISTROY_GEIGER_COUNTER] = { "Geiger Counter", DISTROY_KNOB_WET_DRY },
+    [DISTROY_BOSS_OD]      = { "Boss OD",       "OD",     DISTROY_KNOB_WET_DRY },
+    [DISTROY_FUZZ]         = { "Fuzz",          "FUZZ",   DISTROY_KNOB_GAIN },
+    [DISTROY_METAL]        = { "Metal",         "METAL",  DISTROY_KNOB_GAIN },
+    [DISTROY_TUBESCREAMER] = { "Tubescreamer",  "TS9",    DISTROY_KNOB_WET_DRY },
+    [DISTROY_BIG_MUFF]     = { "Big Muff",      "MUFF",   DISTROY_KNOB_GAIN },
+    [DISTROY_SANSAMP]      = { "Sansamp",       "SANS",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_RAT]          = { "Rat",           "RAT",    DISTROY_KNOB_WET_DRY },
+    [DISTROY_GEIGER_COUNTER] = { "Geiger Counter", "GEIGER", DISTROY_KNOB_WET_DRY },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
     if (type < 0 || type >= DISTROY_TYPE_COUNT) return &kTypeInfo[0];
     return &kTypeInfo[type];
+}
+
+const char* distroy_knob_mode_label(DistroyKnobMode mode) {
+    return mode == DISTROY_KNOB_GAIN ? "GAIN" : "MIX";
 }
 
 /* Fixed internal drive used for WET_DRY-mode pedals, where the knob
@@ -271,16 +275,31 @@ void distroy_chain_init(DistroyChain *c, double sample_rate) {
     }
 }
 
+static unsigned int xorshift_next(unsigned int *state) {
+    unsigned int s = *state;
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    *state = s;
+    return s;
+}
+
 void distroy_chain_randomize(DistroyChain *c, unsigned int seed) {
     unsigned int state = seed;
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
-        /* simple xorshift, avoids depending on libc rand() global state
-         * so multiple instances/tests are independently reproducible */
-        state ^= state << 13;
-        state ^= state >> 17;
-        state ^= state << 5;
-        DistroyType t = (DistroyType)(state % DISTROY_TYPE_COUNT);
+        DistroyType t = (DistroyType)(xorshift_next(&state) % DISTROY_TYPE_COUNT);
         distroy_block_set_type(&c->slots[i], t);
+    }
+}
+
+void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
+    unsigned int state = seed;
+    for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+        DistroyType t = (DistroyType)(xorshift_next(&state) % DISTROY_TYPE_COUNT);
+        distroy_block_set_type(&c->slots[i], t);
+        /* xorshift_next returns a full-range unsigned int -- scale to
+         * 0.0-1.0 */
+        c->slots[i].knob = (double)xorshift_next(&state) / (double)UINT32_MAX;
     }
 }
 

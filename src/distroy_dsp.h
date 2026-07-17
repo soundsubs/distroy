@@ -49,6 +49,7 @@ typedef enum {
 
 typedef struct {
     const char *name;          /* display name, e.g. "Boss OD" */
+    const char *abbrev;        /* short display abbreviation, e.g. "OD" */
     DistroyKnobMode knob_mode; /* which single parameter the knob controls */
 } DistroyTypeInfo;
 
@@ -107,6 +108,14 @@ void distroy_chain_init(DistroyChain *c, double sample_rate);
  * seed: caller-supplied seed (e.g. derived from time) for reproducible
  * testing. */
 void distroy_chain_randomize(DistroyChain *c, unsigned int seed);
+/* Same as above, but also randomizes each slot's knob value (0.0-1.0).
+ * Used for the full "randomize everything" behavior (new chain +
+ * new knob values), both on instantiation and on-demand via the
+ * RANDOMIZE menu action. */
+void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed);
 double distroy_chain_process(DistroyChain *c, double x);
+
+/* Mode label for display, e.g. "GAIN" or "MIX". */
+const char* distroy_knob_mode_label(DistroyKnobMode mode);
 
 #endif /* DISTROY_DSP_H */
