@@ -1,7 +1,7 @@
 {
     "id": "DISTROY",
     "name": "DISTROY",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "abbrev": "DSTRY",
     "description": "8-slot chain of modeled distortion/overdrive pedals (Boss OD, Fuzz, Metal, Tubescreamer, Big Muff, Sansamp, Rat, Geiger Counter) -- random pedal chain + random params on load, signal flows right to left across the 8 knobs",
     "author": "soundsubs",

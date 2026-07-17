@@ -13,13 +13,16 @@
  * state per channel to avoid stereo-collapse artifacts, same pattern
  * as EMAX_FX's per-channel EmaxVoice).
  *
- * CONFIRMED ON REAL HARDWARE: get_param()'s returned string IS what
- * Schwung displays when adjusting a knob -- turning it into
- * "MUFF GAIN 30%" style formatting works. (The static module.json
- * "label" field may still prefix this on-screen -- labels were
- * shortened to bare slot numbers to minimize redundancy, since which
- * pedal occupies a slot is randomized at runtime and can't be baked
- * into a static label.)
+ * CONFIRMED ON REAL HARDWARE: get_param()'s returned string affects
+ * what Schwung displays -- but v0.2.0's "MUFF GAIN 30%" format (name
+ * first) broke knob turning entirely, while the display itself worked.
+ * Working theory: the host parses this string back into a float (e.g.
+ * atof()) to track the value while turning, and a leading non-numeric
+ * character makes that parse fail. v0.2.1 puts the number first
+ * ("30% MUFF GAIN") to stay parseable while keeping the descriptive
+ * text. (The static module.json "label" field was separately shortened
+ * to bare slot numbers, since which pedal occupies a slot is
+ * randomized at runtime and can't be baked into a static label.)
  *
  * On instantiation, AND whenever the "randomize" menu action fires,
  * all 8 slots get a new random pedal type AND a new random knob value
@@ -164,10 +167,15 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
 
     const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
     int pct = (int)lround(inst->left.slots[slot].knob * 100.0);
-    /* Confirmed on real hardware: this returned string is what
-     * Schwung displays when adjusting the knob. */
-    return snprintf(buf, (size_t)buf_len, "%s %s %d%%",
-                     info->abbrev, distroy_knob_mode_label(info->knob_mode), pct);
+    /* NUMBER FIRST: v0.2.0 returned "MUFF GAIN 30%" (name first) and
+     * knob turning broke -- most likely because the host parses this
+     * string back into a float (e.g. atof()) to track the live value
+     * while turning, and atof() reads from the start of the string, so
+     * a string starting with letters parses as 0 and turning stalls.
+     * Putting the number first keeps it parseable while still showing
+     * the descriptive text for the touch-display use case. */
+    return snprintf(buf, (size_t)buf_len, "%d%% %s %s",
+                     pct, info->abbrev, distroy_knob_mode_label(info->knob_mode));
 }
 
 static audio_fx_api_v2_t api = {
