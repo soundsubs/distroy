@@ -33,6 +33,40 @@ models. WMD Geiger Counter in particular is modeled only for its
 aggressive fuzz/clipping character — its sequencer/gate/pattern features
 are out of scope for a knob-controlled audio effect.
 
+## Per-pedal sub-parameters (Drive / Tone / Level)
+
+Every real pedal has more than one control — a Tubescreamer has
+Overdrive/Tone/Level, a Big Muff has Sustain/Tone/Volume, and so on.
+Since only one physical knob is available per slot (already spoken for
+by the primary GAIN/WET_DRY control), each pedal now also gets three
+**randomized-on-load** sub-parameters instead of fixed constants:
+
+- **Drive** — for WET_DRY-mode pedals, this is the pedal's own internal
+  drive amount (previously a fixed constant); for GAIN-mode pedals the
+  primary knob already covers this, so it's unused.
+- **Tone** — a tilt EQ (bass-boost/treble-cut ↔ bass-cut/treble-boost
+  around a per-pedal center frequency), layered on top of that pedal's
+  fixed characteristic coloration filter (which still models the
+  circuit's inherent voicing).
+- **Level** — output trim, ±3dB-ish range.
+
+Every RANDOMIZE (on load or via the menu action) now rolls fresh values
+for all three on every slot, so two chains with the same 8 pedals in
+the same order can still sound meaningfully different.
+
+**Not yet solved: live editing of these via a submenu.** The spec asks
+for these to be adjustable through a sub-menu when a pedal is selected.
+That requires a UI mechanism I haven't confirmed exists — see
+`docs/MODULES.md`'s "Dynamic Definition (get_param)" and mentions of
+nested `ui_hierarchy` levels (Osirus/Virus's module description
+mentions "scrollable categories," suggesting multi-level navigation is
+possible for *some* modules), but I don't have a confirmed working
+example the way Ducker's `module.json` gave us for the base `ui_hierarchy`
+schema. For now, these three are randomized but not live-editable.
+Verified via a dedicated stress test (`make test`): all 8 pedal types ×
+8 corner-case combinations of Drive/Tone/Level at their extremes (0.0
+and 1.0) produce finite output.
+
 ## Status
 
 - **DSP core**: implemented and tested (`make test`) — finite output
@@ -52,26 +86,37 @@ are out of scope for a knob-controlled audio effect.
   schema).
 - **Not yet tested on real Move hardware.**
 
-## Open questions (need on-device testing)
+## Open questions (need on-device testing / real API docs)
 
 1. **"Touching a knob (without turning) shows the pedal's name."**
-   `module.json`'s per-param `label` is static at declare-time, but
-   which pedal occupies a slot is randomized at runtime, so it can't be
-   baked in. `get_param()` currently returns just the plain numeric
-   value (safe default that should keep the knob's fill-arc display
-   working correctly). Whether Schwung has a way for a plugin to
-   dynamically override a param's displayed name is unconfirmed —
-   needs real-device testing.
+   **Confirmed NOT achievable via `get_param()`'s returned string** —
+   tested three approaches on real hardware, all consistent: the host
+   parses the leading number as the literal stored value (not our
+   declared 0.0-1.0 range as a scale factor) and re-formats/displays
+   that number independently, always discarding any appended text,
+   regardless of param `type` (`float` vs `mode`) or number/text
+   ordering. `get_param()` now returns a plain numeric value. Dynamically
+   showing the pedal's name — and by extension, live-editing the
+   Drive/Tone/Level sub-parameters via a submenu — needs a different,
+   unconfirmed API surface (see previous section). Worth asking on the
+   Schwung Discord rather than guessing further.
 2. **"Shift+Touch a knob to pick a different pedal for that slot."**
    No confirmed API for a distinct shift+touch gesture reaching
    third-party `audio_fx` plugins. All 8 knobs are already assigned
    (one per slot), so this would need a secondary access mechanism not
    yet identified. Possibly related to the "Swap Module" / preset-picker
    behavior noticed on EMAX_FX (a host-level UI mechanism, not something
-   plugins directly implement) — worth investigating together once this
-   is running on real hardware.
+   plugins directly implement).
+3. **RANDOMIZE menu action — confirmed working.** Exposed as a 9th
+   param not listed in `module.json`'s `"knobs"` array; it shows up in
+   the module's own jog-wheel-navigable menu and correctly re-rolls the
+   whole chain. This is genuinely useful evidence for #1/#2 above: params
+   outside `"knobs"` DO surface somewhere in the UI — the open question
+   is whether that same surface can host a *submenu of live-editable
+   sub-parameters* per slot, which would solve the Drive/Tone/Level
+   editing question too.
 
-Both are flagged rather than guessed at blind, same approach that worked
+Flagged rather than guessed at blind, same approach that worked
 for narrowing down EMAX_FX's issues.
 
 ## Install

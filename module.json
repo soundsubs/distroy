@@ -1,7 +1,7 @@
 {
     "id": "DISTROY",
     "name": "DISTROY",
-    "version": "0.2.2",
+    "version": "0.3.0",
     "abbrev": "DSTRY",
     "description": "8-slot chain of modeled distortion/overdrive pedals (Boss OD, Fuzz, Metal, Tubescreamer, Big Muff, Sansamp, Rat, Geiger Counter) -- random pedal chain + random params on load, signal flows right to left across the 8 knobs",
     "author": "soundsubs",
@@ -19,7 +19,7 @@
                         {
                             "key": "slot0",
                             "label": "Slot 1",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -29,7 +29,7 @@
                         {
                             "key": "slot1",
                             "label": "Slot 2",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -39,7 +39,7 @@
                         {
                             "key": "slot2",
                             "label": "Slot 3",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -49,7 +49,7 @@
                         {
                             "key": "slot3",
                             "label": "Slot 4",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -59,7 +59,7 @@
                         {
                             "key": "slot4",
                             "label": "Slot 5",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -69,7 +69,7 @@
                         {
                             "key": "slot5",
                             "label": "Slot 6",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -79,7 +79,7 @@
                         {
                             "key": "slot6",
                             "label": "Slot 7",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,
@@ -89,7 +89,7 @@
                         {
                             "key": "slot7",
                             "label": "Slot 8",
-                            "type": "float",
+                            "type": "mode",
                             "min": 0.0,
                             "max": 1.0,
                             "default": 0.5,

@@ -35,10 +35,6 @@ const char* distroy_knob_mode_label(DistroyKnobMode mode) {
     return mode == DISTROY_KNOB_GAIN ? "GAIN" : "MIX";
 }
 
-/* Fixed internal drive used for WET_DRY-mode pedals, where the knob
- * controls blend rather than drive amount. */
-#define NOMINAL_DRIVE 0.6
-
 /* ---------------------------------------------------------------------
  * Filter helpers
  * ------------------------------------------------------------------- */
@@ -91,6 +87,25 @@ double biquad_process(Biquad *f, double x) {
     f->y2 = f->y1;
     f->y1 = y;
     return y;
+}
+
+void tilteq_init(TiltEQ *t, double center_hz, double sample_rate) {
+    t->tone = 0.5;
+    onepole_set_lowpass(&t->lowshelf, center_hz, sample_rate);
+    onepole_set_highpass(&t->highshelf, center_hz, sample_rate);
+}
+
+double tilteq_process(TiltEQ *t, double x) {
+    /* Classic tilt EQ: sum the low-passed and high-passed signal with
+     * complementary gains that shift with "tone". At tone=0.5 both
+     * gains are 1.0 (flat). Range chosen to be characterful without
+     * being extreme (+-4dB-ish). */
+    double lo = onepole_process(&t->lowshelf, x);
+    double hi = onepole_process(&t->highshelf, x);
+    double tilt = (t->tone - 0.5) * 2.0; /* -1.0 .. 1.0 */
+    double lo_gain = 1.0 - tilt * 0.6;
+    double hi_gain = 1.0 + tilt * 0.6;
+    return lo * lo_gain + hi * hi_gain;
 }
 
 /* ---------------------------------------------------------------------
@@ -146,17 +161,41 @@ static double quantize(double x, double levels) {
 void distroy_block_init(DistroyBlock *b, DistroyType type, double sample_rate) {
     b->sample_rate = sample_rate;
     b->knob = 0.5;
+    b->sub_drive = 0.6;
+    b->sub_tone = 0.5;
+    b->sub_level = 0.5;
     b->dc_block = (OnePole){0};
     onepole_set_highpass(&b->dc_block, 15.0, sample_rate);
     b->color_lp = (OnePole){0};
     b->color_hs = (OnePole){0};
     b->color_peak = (Biquad){0};
+    b->tone_stage = (TiltEQ){0};
     distroy_block_set_type(b, type);
+}
+
+/* Tilt EQ center frequency per pedal -- picked to suit each pedal's
+ * typical tonal range (a fuzz's tilt sits lower than a treble-forward
+ * pedal like Rat/Tubescreamer). */
+static double tilt_center_hz(DistroyType type) {
+    switch (type) {
+        case DISTROY_BOSS_OD:      return 1000.0;
+        case DISTROY_FUZZ:         return 700.0;
+        case DISTROY_METAL:        return 900.0;
+        case DISTROY_TUBESCREAMER: return 1200.0;
+        case DISTROY_BIG_MUFF:     return 800.0;
+        case DISTROY_SANSAMP:      return 1000.0;
+        case DISTROY_RAT:          return 1500.0;
+        case DISTROY_GEIGER_COUNTER: return 900.0;
+        default:                   return 1000.0;
+    }
 }
 
 void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
     b->type = type;
     double sr = b->sample_rate;
+
+    tilteq_init(&b->tone_stage, tilt_center_hz(type), sr);
+    b->tone_stage.tone = b->sub_tone;
 
     switch (type) {
         case DISTROY_BOSS_OD:
@@ -253,15 +292,24 @@ double distroy_block_process(DistroyBlock *b, double x) {
     const DistroyTypeInfo *info = distroy_type_info(b->type);
     double wet, out;
 
+    b->tone_stage.tone = b->sub_tone; /* keep in sync in case randomized post-init */
+
     if (info->knob_mode == DISTROY_KNOB_GAIN) {
         wet = type_process(b, x, b->knob);
         out = wet;
     } else {
-        wet = type_process(b, x, NOMINAL_DRIVE);
+        wet = type_process(b, x, b->sub_drive);
         out = x * (1.0 - b->knob) + wet * b->knob;
     }
 
-    return onepole_process(&b->dc_block, out);
+    out = tilteq_process(&b->tone_stage, out);
+    out = onepole_process(&b->dc_block, out);
+
+    /* Level trim: sub_level 0.0-1.0 maps to roughly 0.7x-1.3x (+-3dB-ish),
+     * tasteful range so it colors output level without wrecking gain
+     * staging through the rest of the chain. */
+    double level_gain = 0.7 + b->sub_level * 0.6;
+    return out * level_gain;
 }
 
 /* ---------------------------------------------------------------------
@@ -300,6 +348,10 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
         /* xorshift_next returns a full-range unsigned int -- scale to
          * 0.0-1.0 */
         c->slots[i].knob = (double)xorshift_next(&state) / (double)UINT32_MAX;
+        c->slots[i].sub_drive = (double)xorshift_next(&state) / (double)UINT32_MAX;
+        c->slots[i].sub_tone = (double)xorshift_next(&state) / (double)UINT32_MAX;
+        c->slots[i].sub_level = (double)xorshift_next(&state) / (double)UINT32_MAX;
+        c->slots[i].tone_stage.tone = c->slots[i].sub_tone;
     }
 }
 

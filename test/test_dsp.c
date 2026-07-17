@@ -73,6 +73,38 @@ int main(void) {
     printf("Full chain: finite=%s peak=%.4f\n", chain_ok ? "yes" : "NO", peak);
     if (!chain_ok) all_ok = 0;
 
+    printf("\n=== Sub-parameter (Drive/Tone/Level) extreme-value stress test ===\n");
+    int subparam_ok = 1;
+    double subparam_vals[] = {0.0, 1.0};
+    for (int t = 0; t < DISTROY_TYPE_COUNT; t++) {
+        const DistroyTypeInfo *info = distroy_type_info((DistroyType)t);
+        for (int di = 0; di < 2; di++) {
+            for (int ti = 0; ti < 2; ti++) {
+                for (int li = 0; li < 2; li++) {
+                    DistroyBlock b;
+                    distroy_block_init(&b, (DistroyType)t, 44100.0);
+                    b.knob = 0.7;
+                    b.sub_drive = subparam_vals[di];
+                    b.sub_tone = subparam_vals[ti];
+                    b.sub_level = subparam_vals[li];
+                    double phase = 0.0;
+                    for (int i = 0; i < 4410; i++) {
+                        double x = sin(phase) * 0.8;
+                        phase += 2.0 * M_PI * 220.0 / 44100.0;
+                        double y = distroy_block_process(&b, x);
+                        if (!isfinite(y)) {
+                            printf("[%s] NOT FINITE: drive=%.0f tone=%.0f level=%.0f sample=%d\n",
+                                   info->name, subparam_vals[di], subparam_vals[ti], subparam_vals[li], i);
+                            subparam_ok = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    printf("Sub-parameter stress test (8 corners x 8 types): finite=%s\n", subparam_ok ? "yes" : "NO");
+    if (!subparam_ok) all_ok = 0;
+
     printf("\n=== Randomization distribution check (1000 seeds) ===\n");
     int type_counts[DISTROY_TYPE_COUNT] = {0};
     for (unsigned int seed = 1; seed <= 1000; seed++) {

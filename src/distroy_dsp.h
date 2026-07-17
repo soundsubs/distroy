@@ -77,15 +77,52 @@ typedef struct {
 void biquad_set_peaking(Biquad *f, double freq_hz, double q, double gain_db, double sample_rate);
 double biquad_process(Biquad *f, double x);
 
-/* A single pedal slot: type + knob value (0.0-1.0) + its internal filter
- * state. */
+/* Tilt EQ -- a single "Tone" control that blends between bass-boost/
+ * treble-cut and bass-cut/treble-boost around a center frequency, via
+ * two complementary shelving filters summed. Common in real pedal/
+ * preamp tone stacks (Klon-style, many boost/OD circuits) -- used here
+ * as each pedal's Tone parameter, layered on top of that pedal's own
+ * fixed characteristic coloration filter (which stays fixed, modeling
+ * the circuit's inherent voicing; Tone is the adjustable control on
+ * top of that, same relationship as on a real pedal). */
+typedef struct {
+    OnePole lowshelf;
+    OnePole highshelf;
+    double tone; /* 0.0 = bass boost/treble cut, 1.0 = opposite, 0.5 = flat */
+} TiltEQ;
+
+void tilteq_init(TiltEQ *t, double center_hz, double sample_rate);
+double tilteq_process(TiltEQ *t, double x);
+
+/* A single pedal slot: type + primary knob (0.0-1.0, meaning depends on
+ * type's knob_mode) + per-pedal sub-parameters (Drive/Tone/Level) +
+ * internal filter state.
+ *
+ * SUB-PARAMETERS (Drive, Tone, Level): every real pedal has more than
+ * one control -- a Tubescreamer has Overdrive/Tone/Level, a Big Muff
+ * has Sustain/Tone/Volume, etc. DISTROY only has one physical knob per
+ * slot (already spoken for by the primary GAIN/WET_DRY control), so
+ * these sub-parameters are randomized once per chain load (see
+ * distroy_chain_randomize_all()) rather than knob-controlled -- live
+ * submenu editing of these is a separate, not-yet-implemented UI
+ * question (see README).
+ *
+ * For GAIN-mode types, the primary knob IS the drive amount, so
+ * sub_drive is unused (harmless to still randomize). For WET_DRY-mode
+ * types, sub_drive replaces what used to be a fixed NOMINAL_DRIVE
+ * constant -- now genuinely randomized per load, giving real variety
+ * even among same-type pedals across different sessions. */
 typedef struct {
     DistroyType type;
     double knob;        /* 0.0-1.0, meaning depends on type's knob_mode */
+    double sub_drive;   /* 0.0-1.0, internal drive for WET_DRY-mode types */
+    double sub_tone;     /* 0.0-1.0, feeds TiltEQ */
+    double sub_level;    /* 0.0-1.0, mapped to an output trim range */
     OnePole dc_block;
     OnePole color_lp;    /* used by types with a lowpass coloration (Rat) */
     OnePole color_hs;    /* used by types with a highshelf/presence lift */
     Biquad color_peak;   /* used by types with a peaking/notch coloration */
+    TiltEQ tone_stage;
     double sample_rate;
 } DistroyBlock;
 
@@ -108,10 +145,11 @@ void distroy_chain_init(DistroyChain *c, double sample_rate);
  * seed: caller-supplied seed (e.g. derived from time) for reproducible
  * testing. */
 void distroy_chain_randomize(DistroyChain *c, unsigned int seed);
-/* Same as above, but also randomizes each slot's knob value (0.0-1.0).
- * Used for the full "randomize everything" behavior (new chain +
- * new knob values), both on instantiation and on-demand via the
- * RANDOMIZE menu action. */
+/* Same as above, but also randomizes each slot's knob value AND its
+ * sub-parameters (Drive/Tone/Level) (0.0-1.0 each). Used for the full
+ * "randomize everything" behavior (new chain + new knob + new
+ * sub-params), both on instantiation and on-demand via the RANDOMIZE
+ * menu action. */
 void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed);
 double distroy_chain_process(DistroyChain *c, double x);
 

@@ -165,22 +165,18 @@ static int get_param(void *instance, const char *key, char *buf, int buf_len) {
     int slot = parse_slot_key(key);
     if (slot < 0) return -1;
 
-    /* REVERTED: v0.2.0/0.2.1 tried embedding descriptive text in this
-     * string ("MUFF GAIN 30%", then "30% MUFF GAIN"). Both were wrong.
-     * Confirmed on real hardware: the host does NOT display this string
-     * verbatim -- it parses the leading number as the literal stored
-     * parameter value (not respecting our declared 0.0-1.0 range as a
-     * scale factor) and re-formats/displays THAT number independently
-     * using its own unit/percent rules, discarding any trailing text.
-     * "30% MUFF GAIN" got parsed as the raw value 30 (not 0.30), then
-     * re-formatted as a huge bogus percentage (2300%/5300%/5800%).
-     * Reverting to a plain, correctly-scaled numeric value restores
-     * correct knob behavior. Dynamically showing the pedal's name is
-     * still an OPEN, unsolved question -- no confirmed mechanism found
-     * yet, same status as EMAX_FX's on_midi mystery. Not guessing
-     * further here since the last two guesses both caused real
-     * regressions. */
-    return snprintf(buf, (size_t)buf_len, "%.4f", inst->left.slots[slot].knob);
+    const DistroyTypeInfo *info = distroy_type_info(inst->left.slots[slot].type);
+    int pct = (int)lround(inst->left.slots[slot].knob * 100.0);
+    /* EXPERIMENT (v0.2.3): module.json's declared type changed from
+     * "float" to "mode" for slot params, on the theory that "mode" may
+     * make the host track knob position via its own internal state
+     * rather than re-parsing this returned string as the literal value
+     * (which is what broke things under "float" -- see REVERTED comment
+     * in git history for v0.2.0/0.2.1's failed attempts). If turning
+     * still doesn't work correctly under "mode", this needs a different
+     * approach entirely (possibly requires an API surface not present
+     * in our hand-transcribed audio_fx_api_v2.h -- see README). */
+    return snprintf(buf, (size_t)buf_len, "%s %d%%", info->abbrev, pct);
 }
 
 static audio_fx_api_v2_t api = {
