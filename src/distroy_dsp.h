@@ -2,17 +2,16 @@
 #define DISTROY_DSP_H
 
 /* DISTROY -- an 8-slot serial chain of modeled distortion/overdrive
- * pedals for Schwung (Ableton Move). Signal flows right to left across
- * the 8 knob-mapped slots (slot index 7 processes first, slot index 0
- * processes last -- see distroy_chain_process()).
+ * pedals AND resonant filters for Schwung (Ableton Move). Signal flows
+ * right to left across the 8 knob-mapped slots (slot index 7 processes
+ * first, slot index 0 processes last -- see distroy_chain_process()).
  *
- * Each pedal TYPE is a fixed, characteristic waveshaper plus a fixed
- * (non-knob-controlled) coloration filter modeling that pedal's tonal
- * signature -- e.g. Tubescreamer's mid hump, Metal Zone's scooped mids,
- * Rat's darkening low-pass. Per the project spec, each slot exposes
- * exactly ONE knob-controlled parameter: either GAIN (drive amount) or
- * WET_DRY (blend), depending on which mode that pedal type is assigned
- * -- see DISTROY_KNOB_MODE below and distroy_type_info().
+ * Each pedal/filter TYPE is a fixed, characteristic waveshaper/filter
+ * plus a fixed (non-knob-controlled) coloration modeling that unit's
+ * tonal signature. Per the project spec, each slot exposes exactly ONE
+ * knob-controlled parameter: GAIN (drive amount), WET_DRY (blend), or
+ * for the two filter types, CUTOFF (filter frequency) -- see
+ * DISTROY_KNOB_MODE below and distroy_type_info().
  *
  * KNOWN SIMPLIFICATION: these are characteristic circuit-topology
  * approximations (soft/hard clipping curves + coloration filters tuned
@@ -20,7 +19,12 @@
  * component-level SPICE-accurate models. WMD Geiger Counter in
  * particular is modeled only for its aggressive fuzz/clipping
  * character -- its sequencer/gate/pattern features are out of scope
- * for a knob-controlled audio effect and are not modeled here.
+ * for a knob-controlled audio effect and are not modeled here. The
+ * Moog ladder filter uses the well-known Stilson/Smith discrete
+ * approximation (see MoogLadder below); the Korg-style filter pair is
+ * a characterful approximation of the MS-20's resonant/self-saturating
+ * HPF->LPF behavior, not a literal transcription of its analog
+ * topology (see Korg35HP/Korg35LP below).
  */
 
 #include <stdint.h>
@@ -39,12 +43,15 @@ typedef enum {
     DISTROY_SANSAMP,
     DISTROY_RAT,
     DISTROY_GEIGER_COUNTER,
+    DISTROY_MOOG_LADDER,   /* 4-pole resonant lowpass with input drive */
+    DISTROY_KORG_MS20,     /* resonant HPF -> resonant LPF, each self-saturating */
     DISTROY_TYPE_COUNT
 } DistroyType;
 
 typedef enum {
     DISTROY_KNOB_GAIN = 0,
-    DISTROY_KNOB_WET_DRY
+    DISTROY_KNOB_WET_DRY,
+    DISTROY_KNOB_CUTOFF
 } DistroyKnobMode;
 
 typedef struct {
@@ -94,6 +101,61 @@ typedef struct {
 void tilteq_init(TiltEQ *t, double center_hz, double sample_rate);
 double tilteq_process(TiltEQ *t, double x);
 
+/* Moog-style 4-pole (24dB/oct) resonant lowpass ladder with input
+ * drive/saturation. Structure follows the well-known Stilson/Smith
+ * discrete approximation of the Moog transistor ladder (the reference
+ * model reused across many open-source virtual-analog synths), with a
+ * cubic soft-clip nonlinearity on the resonant feedback node (models
+ * the ladder's inherent self-saturation) and a tanh() saturation on the
+ * input stage for the explicit "Drive" parameter. Resonance can
+ * approach self-oscillation at high settings, same as the real circuit. */
+typedef struct {
+    double stage[4];
+    double delay[4];
+    double p, k;       /* derived filter coefficients */
+    double resonance;   /* compensated resonance amount */
+    double drive;        /* input pre-gain, 1.0 = unity */
+    double sample_rate;
+} MoogLadder;
+
+void moog_ladder_init(MoogLadder *f, double sample_rate);
+/* resonance01/drive01: 0.0-1.0 knob-style inputs, internally scaled. */
+void moog_ladder_set(MoogLadder *f, double cutoff_hz, double resonance01, double drive01);
+double moog_ladder_process(MoogLadder *f, double x);
+
+/* Resonant 2-pole lowpass building block shared by the Korg-style
+ * filter pair below -- same ladder-filter DSP philosophy as MoogLadder
+ * (cascaded one-pole stages + saturating resonant feedback) but with 2
+ * stages instead of 4, giving a 12dB/oct slope closer to the real
+ * MS-20's individual HPF/LPF stages than a full Moog ladder would. */
+typedef struct {
+    double stage[2];
+    double delay[2];
+    double p, k;
+    double resonance;
+    double drive;
+    double sample_rate;
+} Korg35LP;
+
+void korg35lp_init(Korg35LP *f, double sample_rate);
+void korg35lp_set(Korg35LP *f, double cutoff_hz, double resonance01, double drive01);
+double korg35lp_process(Korg35LP *f, double x);
+
+/* Resonant highpass companion -- derived as input minus its own
+ * internal (independently resonant/saturating) lowpass core, a common
+ * technique for getting a characterful resonant HP response from a
+ * ladder-style core. Not a literal transcription of the real MS-20's
+ * analog HPF topology (documented as a simplification, same as every
+ * other pedal in this project), but captures the "distorts on its own"
+ * self-saturating character the real unit is known for. */
+typedef struct {
+    Korg35LP core;
+} Korg35HP;
+
+void korg35hp_init(Korg35HP *f, double sample_rate);
+void korg35hp_set(Korg35HP *f, double cutoff_hz, double resonance01, double drive01);
+double korg35hp_process(Korg35HP *f, double x);
+
 /* A single pedal slot: type + primary knob (0.0-1.0, meaning depends on
  * type's knob_mode) + per-pedal sub-parameters (Drive/Tone/Level) +
  * internal filter state.
@@ -123,6 +185,9 @@ typedef struct {
     OnePole color_hs;    /* used by types with a highshelf/presence lift */
     Biquad color_peak;   /* used by types with a peaking/notch coloration */
     TiltEQ tone_stage;
+    MoogLadder moog;      /* used only by DISTROY_MOOG_LADDER */
+    Korg35HP korg_hp;      /* used only by DISTROY_KORG_MS20 */
+    Korg35LP korg_lp;      /* used only by DISTROY_KORG_MS20 */
     double sample_rate;
 } DistroyBlock;
 

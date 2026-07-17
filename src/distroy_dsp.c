@@ -24,6 +24,8 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_SANSAMP]      = { "Sansamp",       "SANS",   DISTROY_KNOB_WET_DRY },
     [DISTROY_RAT]          = { "Rat",           "RAT",    DISTROY_KNOB_WET_DRY },
     [DISTROY_GEIGER_COUNTER] = { "Geiger Counter", "GEIGER", DISTROY_KNOB_WET_DRY },
+    [DISTROY_MOOG_LADDER]  = { "Moog Ladder",   "MOOG",   DISTROY_KNOB_CUTOFF },
+    [DISTROY_KORG_MS20]    = { "Korg MS-20",    "MS20",   DISTROY_KNOB_CUTOFF },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
@@ -32,8 +34,16 @@ const DistroyTypeInfo* distroy_type_info(DistroyType type) {
 }
 
 const char* distroy_knob_mode_label(DistroyKnobMode mode) {
-    return mode == DISTROY_KNOB_GAIN ? "GAIN" : "MIX";
+    switch (mode) {
+        case DISTROY_KNOB_GAIN: return "GAIN";
+        case DISTROY_KNOB_CUTOFF: return "CUTOFF";
+        default: return "MIX";
+    }
 }
+
+/* Forward declaration -- defined below in the waveshaping primitives
+ * section, but needed earlier by the Moog/Korg35 filter setters. */
+static double clampd(double x, double lo, double hi);
 
 /* ---------------------------------------------------------------------
  * Filter helpers
@@ -106,6 +116,126 @@ double tilteq_process(TiltEQ *t, double x) {
     double lo_gain = 1.0 - tilt * 0.6;
     double hi_gain = 1.0 + tilt * 0.6;
     return lo * lo_gain + hi * hi_gain;
+}
+
+/* ---------------------------------------------------------------------
+ * Moog ladder filter -- Stilson/Smith discrete approximation.
+ * ------------------------------------------------------------------- */
+
+void moog_ladder_init(MoogLadder *f, double sample_rate) {
+    *f = (MoogLadder){0};
+    f->sample_rate = sample_rate;
+    f->drive = 1.0;
+    moog_ladder_set(f, 1000.0, 0.0, 0.0);
+}
+
+void moog_ladder_set(MoogLadder *f, double cutoff_hz, double resonance01, double drive01) {
+    double fc = clampd(cutoff_hz / (f->sample_rate * 0.5), 0.0001, 0.99);
+    f->p = fc * (1.8 - 0.8 * fc);
+    f->k = 2.0 * sin(fc * M_PI * 0.5) - 1.0;
+    double t1 = (1.0 - f->p) * 1.386249;
+    double t2 = 12.0 + t1 * t1;
+    /* resonance01 0-1 -> scaled so it gets characterful without
+     * crossing the classic self-oscillation threshold (~4.0 for this
+     * formula) -- 3.5 leaves headroom given the cubic soft-clip alone
+     * isn't a strong enough damper right at the boundary (verified via
+     * make test: 4.2 diverged to inf/-nan at cutoff=8kHz, resonance=0.5
+     * default -- see also the hard clamp below as a second safety net). */
+    f->resonance = resonance01 * 3.5 * (t2 + 6.0 * t1) / (t2 - 6.0 * t1);
+    f->drive = 1.0 + drive01 * 11.0; /* 1x - 12x input pre-gain */
+}
+
+double moog_ladder_process(MoogLadder *f, double x) {
+    x *= f->drive;
+    x = tanh(x); /* input saturation stage -- the explicit "Drive" character */
+
+    double input = x - f->resonance * f->stage[3];
+    f->stage[0] = input * f->p + f->delay[0] * f->p - f->k * f->stage[0];
+    f->stage[1] = f->stage[0] * f->p + f->delay[1] * f->p - f->k * f->stage[1];
+    f->stage[2] = f->stage[1] * f->p + f->delay[2] * f->p - f->k * f->stage[2];
+    f->stage[3] = f->stage[2] * f->p + f->delay[3] * f->p - f->k * f->stage[3];
+    /* cubic soft-clip on the resonant node -- models the ladder's own
+     * inherent saturation, prevents runaway self-oscillation blowup */
+    f->stage[3] -= (f->stage[3] * f->stage[3] * f->stage[3]) / 6.0;
+
+    /* Hard safety clamp: the cubic term above is a soft damper, not a
+     * hard limit -- near the resonance/cutoff combination that
+     * approaches self-oscillation it can still diverge over many
+     * samples. This is a standard second safety net in production
+     * ladder filter implementations; the clamp range is well outside
+     * normal operating levels so it doesn't audibly affect typical use. */
+    for (int i = 0; i < 4; i++) {
+        f->stage[i] = clampd(f->stage[i], -8.0, 8.0);
+    }
+
+    f->delay[0] = input;
+    f->delay[1] = f->stage[0];
+    f->delay[2] = f->stage[1];
+    f->delay[3] = f->stage[2];
+
+    return f->stage[3];
+}
+
+/* ---------------------------------------------------------------------
+ * Korg-style resonant filter pair (MS-20 character)
+ * ------------------------------------------------------------------- */
+
+void korg35lp_init(Korg35LP *f, double sample_rate) {
+    *f = (Korg35LP){0};
+    f->sample_rate = sample_rate;
+    f->drive = 1.0;
+    korg35lp_set(f, 1000.0, 0.0, 0.0);
+}
+
+void korg35lp_set(Korg35LP *f, double cutoff_hz, double resonance01, double drive01) {
+    double fc = clampd(cutoff_hz / (f->sample_rate * 0.5), 0.0001, 0.99);
+    f->p = fc * (1.8 - 0.8 * fc);
+    f->k = 2.0 * sin(fc * M_PI * 0.5) - 1.0;
+    double t1 = (1.0 - f->p) * 1.386249;
+    double t2 = 12.0 + t1 * t1;
+    /* Only 2 poles instead of 4 -- self-oscillation threshold is
+     * different from the Moog ladder. Same conservative headroom
+     * reasoning as MoogLadder (see its comment) applied here too. */
+    f->resonance = resonance01 * 2.6 * (t2 + 6.0 * t1) / (t2 - 6.0 * t1);
+    f->drive = 1.0 + drive01 * 9.0;
+}
+
+double korg35lp_process(Korg35LP *f, double x) {
+    x *= f->drive;
+    x = tanh(x);
+
+    double input = x - f->resonance * f->stage[1];
+    f->stage[0] = input * f->p + f->delay[0] * f->p - f->k * f->stage[0];
+    f->stage[1] = f->stage[0] * f->p + f->delay[1] * f->p - f->k * f->stage[1];
+    /* saturate the resonant node -- this is the "distorts on its own"
+     * self-saturating character the MS-20 is known for */
+    f->stage[1] -= (f->stage[1] * f->stage[1] * f->stage[1]) / 6.0;
+
+    /* Hard safety clamp -- same reasoning as MoogLadder's, second
+     * safety net beyond the soft cubic damper. */
+    f->stage[0] = clampd(f->stage[0], -8.0, 8.0);
+    f->stage[1] = clampd(f->stage[1], -8.0, 8.0);
+
+    f->delay[0] = input;
+    f->delay[1] = f->stage[0];
+
+    return f->stage[1];
+}
+
+void korg35hp_init(Korg35HP *f, double sample_rate) {
+    korg35lp_init(&f->core, sample_rate);
+}
+
+void korg35hp_set(Korg35HP *f, double cutoff_hz, double resonance01, double drive01) {
+    korg35lp_set(&f->core, cutoff_hz, resonance01, drive01);
+}
+
+double korg35hp_process(Korg35HP *f, double x) {
+    /* Resonant highpass derived as input minus its own independently
+     * resonant/saturating lowpass core -- see header comment for why
+     * this isn't a literal transcription of the real analog HPF. */
+    double lp = korg35lp_process(&f->core, x);
+    return x - lp;
 }
 
 /* ---------------------------------------------------------------------
@@ -222,6 +352,13 @@ void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
         case DISTROY_GEIGER_COUNTER:
             /* no fixed filter -- character comes from asym clip + quantize */
             break;
+        case DISTROY_MOOG_LADDER:
+            moog_ladder_init(&b->moog, sr);
+            break;
+        case DISTROY_KORG_MS20:
+            korg35hp_init(&b->korg_hp, sr);
+            korg35lp_init(&b->korg_lp, sr);
+            break;
         default:
             break;
     }
@@ -283,6 +420,27 @@ static double type_process(DistroyBlock *b, double x, double drive) {
             double levels = 64.0 - drive * 48.0; /* more crunch at higher drive */
             return quantize(y, levels);
         }
+        case DISTROY_MOOG_LADDER: {
+            /* For CUTOFF-mode types, the "drive" argument here is
+             * actually the primary knob value (0.0-1.0), log-mapped to
+             * cutoff Hz. sub_drive/sub_tone are repurposed as the
+             * filter's own Drive/Resonance (not the usual meaning). */
+            double cutoff_hz = 80.0 * pow(8000.0 / 80.0, drive);
+            moog_ladder_set(&b->moog, cutoff_hz, b->sub_tone, b->sub_drive);
+            return moog_ladder_process(&b->moog, x);
+        }
+        case DISTROY_KORG_MS20: {
+            double cutoff_hz = 80.0 * pow(8000.0 / 80.0, drive);
+            /* HPF corner tracks proportionally below the main cutoff,
+             * giving the classic MS-20 "sweeping narrow band" character
+             * as the single knob moves, rather than a fixed HP corner. */
+            double hp_cutoff = clampd(cutoff_hz * 0.15, 40.0, 2000.0);
+            korg35hp_set(&b->korg_hp, hp_cutoff, b->sub_tone, b->sub_drive);
+            korg35lp_set(&b->korg_lp, cutoff_hz, b->sub_tone, b->sub_drive);
+            double y = korg35hp_process(&b->korg_hp, x);
+            y = korg35lp_process(&b->korg_lp, y);
+            return y;
+        }
         default:
             return x;
     }
@@ -291,15 +449,23 @@ static double type_process(DistroyBlock *b, double x, double drive) {
 double distroy_block_process(DistroyBlock *b, double x) {
     const DistroyTypeInfo *info = distroy_type_info(b->type);
     double wet, out;
+    int is_filter_type = (info->knob_mode == DISTROY_KNOB_CUTOFF);
 
-    b->tone_stage.tone = b->sub_tone; /* keep in sync in case randomized post-init */
+    /* Filter types (Moog/Korg) repurpose sub_tone as Resonance, not
+     * TiltEQ tone -- keep the tone stage neutral/flat for them so it
+     * doesn't double up with the filter's own resonance character. */
+    b->tone_stage.tone = is_filter_type ? 0.5 : b->sub_tone;
 
-    if (info->knob_mode == DISTROY_KNOB_GAIN) {
-        wet = type_process(b, x, b->knob);
-        out = wet;
-    } else {
+    if (info->knob_mode == DISTROY_KNOB_WET_DRY) {
         wet = type_process(b, x, b->sub_drive);
         out = x * (1.0 - b->knob) + wet * b->knob;
+    } else {
+        /* GAIN and CUTOFF modes both pass the knob straight through and
+         * are fully wet (no dry blend) -- see type_process for how
+         * CUTOFF-mode types (Moog/Korg) interpret this argument as
+         * cutoff frequency rather than drive/gain. */
+        wet = type_process(b, x, b->knob);
+        out = wet;
     }
 
     out = tilteq_process(&b->tone_stage, out);

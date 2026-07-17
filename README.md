@@ -17,6 +17,41 @@ the 8 knobs (knob 8 processes first, knob 1 processes last).
 | Sansamp | Wet/Dry | Blended clean + saturated signal, warmth boost |
 | Rat | Wet/Dry | Hard clip + drive-linked darkening low-pass |
 | Geiger Counter | Wet/Dry | Aggressive asymmetric clip + quantization grit |
+| Moog Ladder | Cutoff | 4-pole (24dB/oct) resonant lowpass, self-saturating, with Drive |
+| Korg MS-20 | Cutoff | Resonant HPF -> resonant LPF in series, each self-saturating |
+
+**Why the filters were added:** a chain of 8 distortion stages tends to
+compound gain fast enough that everything collapses into a clipped
+square wave by the output. Adding two filter types into the same random
+pool means roughly 1 in 5 slots will be a filter instead of another
+distortion stage, breaking up the cascade and giving the chain real
+tonal variety instead of just "more clipping."
+
+**Moog Ladder** uses the well-known Stilson/Smith discrete
+approximation of the classic transistor ladder filter (the reference
+model reused across many open-source virtual-analog synths) — 4 cascaded
+one-pole stages with resonant feedback, a cubic soft-clip on the
+resonant node (the ladder's own inherent saturation), and an explicit
+tanh() input drive stage. Resonance can approach self-oscillation at
+high settings, same as the real circuit.
+
+**Korg MS-20** models the character of the real unit's resonant
+HPF-into-LPF signal path, where each stage distorts on its own and feeds
+the other — implemented as two independently resonant, self-saturating
+2-pole stages (same ladder-filter DSP philosophy as the Moog, just 2
+poles instead of 4) in series. This is a characterful approximation, not
+a literal transcription of the real analog HPF/LPF topology (see Known
+Simplification below).
+
+**Stability note:** ladder-style resonant filters can genuinely diverge
+to infinity near their self-oscillation threshold if not carefully
+damped — this actually happened during testing (`make test` caught it:
+Moog Ladder produced `inf`/`nan` at max cutoff with default resonance).
+Fixed by pulling back resonance headroom from the classic formula's ~4.0
+self-oscillation threshold, plus a hard safety clamp on internal filter
+state as a second safety net. Verified via a dedicated worst-case test:
+max cutoff + max resonance + max drive simultaneously, sustained for a
+full second, stays finite.
 
 **Knob mode design note:** the spec calls for knobs to default to a
 "wet/dry amount," with some pedals using Gain instead. I split this as:

@@ -24,7 +24,7 @@ static int check_finite_sweep(const char *label, DistroyType type, DistroyKnobMo
         }
     }
     printf("[%s] mode=%s finite=%s peak=%.4f\n",
-           label, mode == DISTROY_KNOB_GAIN ? "GAIN" : "WET_DRY",
+           label, distroy_knob_mode_label(mode),
            ok ? "yes" : "NO", peak);
     return ok;
 }
@@ -49,7 +49,7 @@ int main(void) {
     for (int i = DISTROY_NUM_SLOTS - 1; i >= 0; i--) {
         const DistroyTypeInfo *info = distroy_type_info(chain.slots[i].type);
         printf("  slot %d: %s (%s)\n", i, info->name,
-               info->knob_mode == DISTROY_KNOB_GAIN ? "Gain" : "Wet/Dry");
+               distroy_knob_mode_label(info->knob_mode));
     }
 
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
@@ -104,6 +104,31 @@ int main(void) {
     }
     printf("Sub-parameter stress test (8 corners x 8 types): finite=%s\n", subparam_ok ? "yes" : "NO");
     if (!subparam_ok) all_ok = 0;
+
+    printf("\n=== Moog/Korg worst-case test: max cutoff + max resonance together ===\n");
+    int filter_worst_ok = 1;
+    DistroyType filter_types[] = {DISTROY_MOOG_LADDER, DISTROY_KORG_MS20};
+    for (int ti = 0; ti < 2; ti++) {
+        DistroyBlock b;
+        distroy_block_init(&b, filter_types[ti], 44100.0);
+        b.knob = 1.0;        /* max cutoff */
+        b.sub_tone = 1.0;    /* max resonance */
+        b.sub_drive = 1.0;   /* max drive too, for good measure */
+        double phase = 0.0;
+        for (int i = 0; i < 44100; i++) { /* 1s, plenty of time to diverge if unstable */
+            double x = sin(phase) * 0.9;
+            phase += 2.0 * M_PI * 220.0 / 44100.0;
+            double y = distroy_block_process(&b, x);
+            if (!isfinite(y)) {
+                printf("[%s] NOT FINITE at max cutoff+resonance+drive, sample %d: %f\n",
+                       distroy_type_info(filter_types[ti])->name, i, y);
+                filter_worst_ok = 0;
+                break;
+            }
+        }
+    }
+    printf("Moog/Korg worst-case: finite=%s\n", filter_worst_ok ? "yes" : "NO");
+    if (!filter_worst_ok) all_ok = 0;
 
     printf("\n=== Randomization distribution check (1000 seeds) ===\n");
     int type_counts[DISTROY_TYPE_COUNT] = {0};

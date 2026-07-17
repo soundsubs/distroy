@@ -124,12 +124,14 @@ static void process_block(void *instance, int16_t *audio_inout, int frames) {
     }
 }
 
-/* Parses "slotN" -> N (0-7), or -1 if the key doesn't match. */
+/* Parses "slotN" -> array index N-1 (0-7), or -1 if the key doesn't
+ * match. Keys are 1-based ("slot1".."slot8") to match on-screen slot
+ * numbering; internal array indices stay 0-based. */
 static int parse_slot_key(const char *key) {
     if (strncmp(key, "slot", 4) != 0) return -1;
     int n = atoi(key + 4);
-    if (n < 0 || n >= DISTROY_NUM_SLOTS) return -1;
-    return n;
+    if (n < 1 || n > DISTROY_NUM_SLOTS) return -1;
+    return n - 1;
 }
 
 static void set_param(void *instance, const char *key, const char *val) {

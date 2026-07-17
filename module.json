@@ -1,9 +1,9 @@
 {
     "id": "DISTROY",
     "name": "DISTROY",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "abbrev": "DSTRY",
-    "description": "8-slot chain of modeled distortion/overdrive pedals (Boss OD, Fuzz, Metal, Tubescreamer, Big Muff, Sansamp, Rat, Geiger Counter) -- random pedal chain + random params on load, signal flows right to left across the 8 knobs",
+    "description": "8-slot chain of modeled distortion/overdrive pedals and resonant filters (Boss OD, Fuzz, Metal, Tubescreamer, Big Muff, Sansamp, Rat, Geiger Counter, Moog Ladder, Korg MS-20) -- random pedal chain + random params on load, signal flows right to left across the 8 knobs",
     "author": "soundsubs",
     "license": "MIT",
     "dsp": "DISTROY.so",
@@ -17,7 +17,7 @@
                     "name": "DISTROY",
                     "params": [
                         {
-                            "key": "slot0",
+                            "key": "slot1",
                             "label": "Slot 1",
                             "type": "mode",
                             "min": 0.0,
@@ -27,7 +27,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot1",
+                            "key": "slot2",
                             "label": "Slot 2",
                             "type": "mode",
                             "min": 0.0,
@@ -37,7 +37,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot2",
+                            "key": "slot3",
                             "label": "Slot 3",
                             "type": "mode",
                             "min": 0.0,
@@ -47,7 +47,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot3",
+                            "key": "slot4",
                             "label": "Slot 4",
                             "type": "mode",
                             "min": 0.0,
@@ -57,7 +57,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot4",
+                            "key": "slot5",
                             "label": "Slot 5",
                             "type": "mode",
                             "min": 0.0,
@@ -67,7 +67,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot5",
+                            "key": "slot6",
                             "label": "Slot 6",
                             "type": "mode",
                             "min": 0.0,
@@ -77,7 +77,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot6",
+                            "key": "slot7",
                             "label": "Slot 7",
                             "type": "mode",
                             "min": 0.0,
@@ -87,7 +87,7 @@
                             "unit": "%"
                         },
                         {
-                            "key": "slot7",
+                            "key": "slot8",
                             "label": "Slot 8",
                             "type": "mode",
                             "min": 0.0,
@@ -108,14 +108,14 @@
                         }
                     ],
                     "knobs": [
-                        "slot0",
                         "slot1",
                         "slot2",
                         "slot3",
                         "slot4",
                         "slot5",
                         "slot6",
-                        "slot7"
+                        "slot7",
+                        "slot8"
                     ]
                 }
             }
