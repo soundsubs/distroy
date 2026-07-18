@@ -1,0 +1,87 @@
+name: Build DISTROYBOY
+
+# Builds on GitHub's own macOS and Windows runners -- no local Mac or
+# Windows toolchain required beyond pushing to this repo. Both jobs
+# check out JUCE fresh each run (not vendored/submoduled) to keep the
+# repo small, matching how the project is built locally.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout DISTROYBOY
+        uses: actions/checkout@v4
+
+      - name: Checkout JUCE
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          path: JUCE
+
+      - name: "Configure (universal binary: arm64 + x86_64)"
+        # CMAKE_BUILD_TYPE must be set here, at configure time, for
+        # macOS's default single-config generator (Unix Makefiles) --
+        # unlike Windows' multi-config Visual Studio generator (where
+        # `--config Release` at BUILD time is sufficient, which is why
+        # this wasn't caught by the successful local Windows build).
+        # Without it, the output artefact path doesn't get a "Release"
+        # subfolder at all, breaking the next step's assumed path.
+        run: cmake -B build -DJUCE_DIR=${{ github.workspace }}/JUCE -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Zip the .vst3 bundle
+        # Zipping ourselves (rather than letting upload-artifact zip it)
+        # preserves the bundle's internal structure/permissions more
+        # reliably than GitHub's automatic artifact packaging does for
+        # macOS app/plugin bundles. Uses `find` rather than a hardcoded
+        # path so a future JUCE/CMake version that changes the artefact
+        # folder layout fails with a clear diagnostic instead of a
+        # cryptic "no such file" error.
+        run: |
+          VST3_PATH=$(find build -iname "DISTROYBOY.vst3" -type d | head -n 1)
+          if [ -z "$VST3_PATH" ]; then
+            echo "ERROR: could not find DISTROYBOY.vst3 anywhere under build/"
+            echo "Directory tree for debugging:"
+            find build -maxdepth 5
+            exit 1
+          fi
+          echo "Found: $VST3_PATH"
+          cd "$(dirname "$VST3_PATH")"
+          zip -r "${{ github.workspace }}/DISTROYBOY-macOS.zip" "$(basename "$VST3_PATH")"
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: DISTROYBOY-macOS
+          path: DISTROYBOY-macOS.zip
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout DISTROYBOY
+        uses: actions/checkout@v4
+
+      - name: Checkout JUCE
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          path: JUCE
+
+      - name: Configure
+        run: cmake -B build -DJUCE_DIR=${{ github.workspace }}/JUCE
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: DISTROYBOY-Windows
+          path: build/DISTROYBOY_artefacts/Release/VST3/DISTROYBOY.vst3

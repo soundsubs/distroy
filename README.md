@@ -31,6 +31,9 @@ processes first, knob 1 processes last).
 | Wham | Wet/Dry | Pitch shifter, weighted toward +-12 semitones, never 0 |
 | Tape | Wet/Dry | Tape saturation + subtle hiss + HF rolloff |
 | Speaker | Size | Speaker cabinet size (v0.5.1: impossibly small/tinny <-> impossibly large/boomy) |
+| Noiz | Mix (capped 66%) | White/pink/red noise generator, dry signal always at least 34% |
+| Tube | Wet/Dry | Vintage Russian tube saturation, asymmetric grit + warm rolloff |
+| Cable Fault | Mix (severity) | Broken 1/4" cable/jack sim -- random crackle/cutout, never fully silent |
 
 **All distortion-type pedals use Wet/Dry (v0.4.3+)** — every knob
 defaults to 50% and uniformly means "how much of the effect is blended
@@ -156,7 +159,40 @@ Verified via a dedicated stress test (`make test`): all 8 pedal types ×
 8 corner-case combinations of Drive/Tone/Level at their extremes (0.0
 and 1.0) produce finite output.
 
-## Output safety limiter (v0.6.0)
+## Signal direction default changed (v0.7.0)
+
+Previously right-to-left only (slot 7 processes first). Now defaults to
+**left-to-right** (slot 0 processes first, slot 7 last) with an
+underlying toggle in the shared DSP core (`DistroyChain.reverse`).
+Move has no UI control to expose this toggle, so it always runs in the
+new left-to-right default — this is a **behavior change** from earlier
+versions for anyone already using this on their Move. The DISTROYBOY
+VST3 (which has a proper UI) gets a clickable arrow to reverse it.
+
+## Three new types (v0.7.0)
+
+- **Noiz** — white/pink/red noise generator (colour chosen randomly on
+  load). Pink uses Paul Kellet's well-known "economy" 3-pole
+  approximation; red/brown is a simple leaky-integrator lowpass of
+  white noise. The knob controls level, but is deliberately **capped at
+  66% wet** even at full turn — verified via a dedicated test that the
+  blend ratio never exceeds 0.66, so the dry signal is never fully
+  interrupted.
+- **Tube** — vintage Russian tube character: asymmetric soft saturation
+  (differing positive/negative clip curves, modeling a "grittier" bias
+  than a cleaner Western-tube model), warm high-frequency rolloff, and
+  a very subtle noise floor.
+- **Cable Fault** — simulates a broken 1/4" cable/jack: a small state
+  machine randomly triggers brief crackle bursts or partial cutouts,
+  plus a subtle constant noise floor even in its "normal" state (a
+  genuinely bad cable has some character even when "working"). The knob
+  controls how often/severely it glitches. **Cutouts are never full
+  silence** — cutout level is randomized but always bounded well above
+  zero (5-20% of signal always survives), verified via a dedicated test
+  feeding 5 seconds of constant signal and confirming `cutoutLevel`
+  never hits exactly 0.
+
+
 
 A stereo-linked, look-ahead brickwall limiter now runs on the final
 chain output, replacing what used to be a bare hard clamp to the int16

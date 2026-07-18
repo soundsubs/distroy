@@ -37,9 +37,6 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_WHAM]         = { "Wham",          "WHAM",   DISTROY_KNOB_WET_DRY },
     [DISTROY_TAPE]         = { "Tape",          "TAPE",   DISTROY_KNOB_WET_DRY },
     [DISTROY_SPKR]         = { "Speaker",       "SPKR",   DISTROY_KNOB_SIZE },
-    [DISTROY_NOIZ]         = { "Noiz",          "NOIZ",   DISTROY_KNOB_WET_DRY },
-    [DISTROY_TUBE]         = { "Tube",          "TUBE",   DISTROY_KNOB_WET_DRY },
-    [DISTROY_CABL]         = { "Cable Fault",   "CABL",   DISTROY_KNOB_WET_DRY },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
@@ -391,120 +388,6 @@ double noise_next(SimpleNoise *n) {
 }
 
 /* ---------------------------------------------------------------------
- * Three-colour noise generator (NOIZ)
- * ------------------------------------------------------------------- */
-
-void noisegen_init(NoiseGen *n, unsigned int seed) {
-    noise_init(&n->white, seed);
-    n->pink_b0 = 0.0;
-    n->pink_b1 = 0.0;
-    n->pink_b2 = 0.0;
-    n->brown_state = 0.0;
-}
-
-double noisegen_process(NoiseGen *n, NoiseColour colour) {
-    double white = noise_next(&n->white);
-
-    switch (colour) {
-        case NOISE_PINK: {
-            /* Paul Kellet's well-known "economy" pink noise filter --
-             * a standard cheap 3-pole approximation reused widely for
-             * exactly this purpose, not a theoretically exact -3dB/oct
-             * filter. */
-            n->pink_b0 = 0.99765 * n->pink_b0 + white * 0.0990460;
-            n->pink_b1 = 0.96300 * n->pink_b1 + white * 0.2965164;
-            n->pink_b2 = 0.57000 * n->pink_b2 + white * 1.0526913;
-            double pink = n->pink_b0 + n->pink_b1 + n->pink_b2 + white * 0.1848;
-            return pink * 0.11; /* rescale back toward -1..1 range */
-        }
-        case NOISE_RED: {
-            /* Simple leaky-integrator brown/red noise -- heavily
-             * lowpassed white noise, rescaled up since integration
-             * attenuates amplitude a lot. */
-            n->brown_state = n->brown_state * 0.98 + white * 0.02;
-            return n->brown_state * 3.5;
-        }
-        case NOISE_WHITE:
-        default:
-            return white;
-    }
-}
-
-/* ---------------------------------------------------------------------
- * Broken 1/4" cable/jack fault simulation (CABL)
- * ------------------------------------------------------------------- */
-
-void cablesim_init(CableSim *c, unsigned int seed) {
-    c->state = CABLE_NORMAL;
-    c->stateSamplesRemaining = 0;
-    c->eventCountdown = 4410; /* ~0.1s before the first possible event */
-    c->cutoutLevel = 0.1;
-    noise_init(&c->noise, seed);
-    c->rngState = seed != 0 ? seed : 1;
-}
-
-static unsigned int cablesim_rand(CableSim *c) {
-    unsigned int s = c->rngState;
-    s ^= s << 13;
-    s ^= s >> 17;
-    s ^= s << 5;
-    c->rngState = s;
-    return s;
-}
-
-double cablesim_process(CableSim *c, double x, double severity01, double sample_rate) {
-    double sev = clampd(severity01, 0.0, 1.0);
-
-    if (c->state == CABLE_NORMAL) {
-        c->eventCountdown--;
-        if (c->eventCountdown <= 0) {
-            unsigned int r = cablesim_rand(c);
-            double roll = (double)(r % 1000) / 1000.0;
-            if (roll < 0.55) {
-                c->state = CABLE_CRACKLE;
-                /* 5-35ms crackle burst */
-                double durSec = 0.005 + (double)((r >> 8) % 100) / 100.0 * 0.03;
-                c->stateSamplesRemaining = (int)(sample_rate * durSec);
-            } else {
-                c->state = CABLE_CUTOUT;
-                /* IMPORTANT: never fully silent -- 5-20% of signal
-                 * always survives a "cutout", matching the spec's
-                 * "never fully off" requirement. */
-                c->cutoutLevel = 0.05 + (double)((r >> 16) % 100) / 100.0 * 0.15;
-                double durSec = 0.01 + (double)((r >> 4) % 150) / 150.0 * 0.08;
-                c->stateSamplesRemaining = (int)(sample_rate * durSec);
-            }
-            /* Next event timing scales with severity -- higher severity
-             * (knob turned up) means more frequent glitches. Range is
-             * wide either way (a "barely broken" cable still glitches
-             * occasionally; a "very broken" one glitches often). */
-            double minGap = 0.08 + (1.0 - sev) * 0.4;   /* 0.08-0.48s */
-            double maxGap = 0.3 + (1.0 - sev) * 2.2;     /* 0.3-2.5s */
-            double gapSec = minGap + (double)(cablesim_rand(c) % 1000) / 1000.0 * (maxGap - minGap);
-            c->eventCountdown = (int)(sample_rate * gapSec);
-        }
-    } else {
-        c->stateSamplesRemaining--;
-        if (c->stateSamplesRemaining <= 0) {
-            c->state = CABLE_NORMAL;
-        }
-    }
-
-    switch (c->state) {
-        case CABLE_CRACKLE:
-            return x + noise_next(&c->noise) * (0.3 + sev * 0.4);
-        case CABLE_CUTOUT:
-            return x * c->cutoutLevel + noise_next(&c->noise) * 0.05;
-        case CABLE_NORMAL:
-        default:
-            /* Subtle baseline crackle even when "working" -- a
-             * genuinely bad cable has some character even between
-             * glitch events. */
-            return x + noise_next(&c->noise) * (0.003 + sev * 0.01);
-    }
-}
-
-/* ---------------------------------------------------------------------
  * Brickwall limiter (stereo-linked, look-ahead) -- see header comment.
  * ------------------------------------------------------------------- */
 
@@ -567,49 +450,6 @@ void brickwall_limiter_process(BrickwallLimiter *lim, double *l, double *r) {
 
     *l = out_l;
     *r = out_r;
-}
-
-/* ---------------------------------------------------------------------
- * Battery-starve simulator (VST3 power icon feature only)
- * ------------------------------------------------------------------- */
-
-void powerstarve_init(PowerStarve *ps, unsigned int seed) {
-    ps->amount = 0.0;
-    ps->lfoPhase = 0.0;
-    noise_init(&ps->noise, seed);
-}
-
-void powerstarve_set_amount(PowerStarve *ps, double amount01) {
-    ps->amount = clampd(amount01, 0.0, 1.0);
-}
-
-double powerstarve_process(PowerStarve *ps, double x, double sample_rate) {
-    if (ps->amount <= 0.0001) return x; /* fast path when normal/unused */
-
-    const double a = ps->amount;
-
-    /* Sag/compression: reduced headroom as the battery weakens, more
-     * aggressive soft clipping. */
-    double driveAmt = 1.0 + a * 2.5;
-    double norm = tanh(driveAmt);
-    double sagged = (norm > 1e-9) ? (tanh(x * driveAmt) / norm) : x;
-
-    /* Amplitude wobble: unstable supply voltage, gets faster and deeper
-     * as the battery dies further. */
-    double lfoRateHz = 0.6 + a * 3.0;
-    ps->lfoPhase += 2.0 * M_PI * lfoRateHz / sample_rate;
-    if (ps->lfoPhase > 2.0 * M_PI) ps->lfoPhase -= 2.0 * M_PI;
-    double wobble = 1.0 + sin(ps->lfoPhase) * a * 0.18;
-
-    /* Overall level loss -- approaches near-total signal loss at
-     * amount=1.0, deliberately (unlike CABL, this one IS allowed to go
-     * almost fully silent -- "almost disconnect power" per spec). */
-    double levelGain = pow(1.0 - a, 2.0);
-
-    /* Power-supply noise bleeding in as headroom drops. */
-    double hiss = noise_next(&ps->noise) * a * 0.02;
-
-    return sagged * levelGain * wobble + hiss;
 }
 
 /* ---------------------------------------------------------------------
@@ -719,7 +559,6 @@ static double tilt_center_hz(DistroyType type) {
         case DISTROY_REKT:         return 900.0;
         case DISTROY_WHAM:         return 1000.0;
         case DISTROY_TAPE:         return 1500.0;
-        case DISTROY_TUBE:         return 1200.0;
         default:                   return 1000.0;
     }
 }
@@ -784,15 +623,6 @@ void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
             break;
         case DISTROY_FZ1W:
             biquad_set_peaking(&b->color_peak, 1000.0, 1.0, 2.0, sr); /* tighter presence than vintage Fuzz */
-            break;
-        case DISTROY_NOIZ:
-            noisegen_init(&b->noisegen, (unsigned int)(uintptr_t)b ^ 0x51ed270bu);
-            break;
-        case DISTROY_TUBE:
-            onepole_set_lowpass(&b->color_lp, 10000.0, sr); /* warm top-end rolloff */
-            break;
-        case DISTROY_CABL:
-            cablesim_init(&b->cable, (unsigned int)(uintptr_t)b ^ 0x27d4eb2du);
             break;
         default:
             break;
@@ -967,41 +797,6 @@ static double type_process(DistroyBlock *b, double x, double drive) {
             y = onepole_process(&b->color_lp, y);
             return biquad_process(&b->color_peak, y);
         }
-        case DISTROY_NOIZ: {
-            /* WET_DRY-mode but with a SPECIAL CAP applied externally in
-             * distroy_block_process (never lets the blend exceed 66%,
-             * so the dry signal is never fully interrupted) -- this
-             * function just generates the raw noise; the cap is applied
-             * at the mixing stage, not here. sub_tone (repurposed,
-             * tilt skipped for this type) picks which noise colour:
-             * 0.0-0.33 white, 0.33-0.66 pink, 0.66-1.0 red/brown. */
-            NoiseColour colour = (b->sub_tone < 0.33) ? NOISE_WHITE
-                                : (b->sub_tone < 0.66) ? NOISE_PINK
-                                : NOISE_RED;
-            (void)drive; /* drive/knob handled entirely by the capped blend in distroy_block_process */
-            return noisegen_process(&b->noisegen, colour);
-        }
-        case DISTROY_TUBE: {
-            /* Vintage Russian tube character -- asymmetric soft
-             * saturation (differing pos/neg curve, modeling triode-
-             * style asymmetric clipping with a "grittier" bias than a
-             * cleaner Western-tube model), warm HF rolloff, and a very
-             * subtle noise floor (real tubes have some inherent hiss). */
-            double gain = 1.4 + drive * 2.6;
-            double y = asym_soft_clip(gain * x, 2.2 + drive * 1.0, 2.8 + drive * 1.6);
-            y = onepole_process(&b->color_lp, y);
-            double hiss = noise_next(&b->noise) * 0.0015;
-            return y + hiss;
-        }
-        case DISTROY_CABL: {
-            /* Full-wet, "drive" here is the knob value used directly as
-             * the glitch severity parameter (see distroy_block_process
-             * -- CABL is dispatched as a special case, not through the
-             * normal WET_DRY blend, since the state machine already
-             * decides internally how much of the dry signal survives
-             * moment to moment). */
-            return cablesim_process(&b->cable, x, drive, b->sample_rate);
-        }
         default:
             return x;
     }
@@ -1011,36 +806,17 @@ double distroy_block_process(DistroyBlock *b, double x) {
     const DistroyTypeInfo *info = distroy_type_info(b->type);
     double wet, out;
     /* These types repurpose sub_tone for something other than TiltEQ
-     * tone (Moog/Korg: Resonance, LOFI: sample-rate encode, NOIZ: noise
-     * colour select) -- keep the tone stage neutral/flat for them so it
-     * doesn't double up. NOTE: this is NOT simply "all CUTOFF-mode
-     * types" -- SPKR is also CUTOFF mode but keeps normal Tone/TiltEQ,
-     * since its sub_tone still means Tone for that type. */
+     * tone (Moog/Korg: Resonance, LOFI: sample-rate encode) -- keep
+     * the tone stage neutral/flat for them so it doesn't double up.
+     * NOTE: this is NOT simply "all CUTOFF-mode types" -- SPKR is also
+     * CUTOFF mode but keeps normal Tone/TiltEQ, since its sub_tone
+     * still means Tone for that type. */
     int skip_tilt = (b->type == DISTROY_MOOG_LADDER || b->type == DISTROY_KORG_MS20
-                      || b->type == DISTROY_LOFI || b->type == DISTROY_NOIZ);
+                      || b->type == DISTROY_LOFI);
 
     b->tone_stage.tone = skip_tilt ? 0.5 : b->sub_tone;
 
-    if (b->type == DISTROY_CABL) {
-        /* Special case: NOT the standard WET_DRY blend, even though its
-         * declared knob_mode is WET_DRY (for label purposes -- "MIX"
-         * reads reasonably as "how broken"). The knob is passed
-         * straight through as the glitch severity parameter; the state
-         * machine inside type_process/cablesim_process already decides
-         * internally how much dry signal survives moment to moment, so
-         * an ADDITIONAL external blend here would just double up. */
-        wet = type_process(b, x, b->knob);
-        out = wet;
-    } else if (b->type == DISTROY_NOIZ) {
-        /* Special case: standard WET_DRY blend formula, but the wet
-         * contribution is capped at 66% max regardless of knob
-         * position, per spec ("can never reach 66% at full, otherwise
-         * it would interrupt the signal") -- guarantees at least 34%
-         * dry signal always survives. */
-        double cappedKnob = b->knob * 0.66;
-        wet = type_process(b, x, b->sub_drive);
-        out = x * (1.0 - cappedKnob) + wet * cappedKnob;
-    } else if (info->knob_mode == DISTROY_KNOB_WET_DRY) {
+    if (info->knob_mode == DISTROY_KNOB_WET_DRY) {
         wet = type_process(b, x, b->sub_drive);
         out = x * (1.0 - b->knob) + wet * b->knob;
     } else {
@@ -1068,7 +844,6 @@ double distroy_block_process(DistroyBlock *b, double x) {
 
 void distroy_chain_init(DistroyChain *c, double sample_rate) {
     c->sample_rate = sample_rate;
-    c->reverse = 0; /* default: left to right (slot 0 first) */
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
         distroy_block_init(&c->slots[i], DISTROY_BOSS_OD, sample_rate);
     }
@@ -1145,16 +920,9 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
 
 double distroy_chain_process(DistroyChain *c, double x) {
     double y = x;
-    if (c->reverse) {
-        /* Right to left: slot 7 processes first, slot 0 last. */
-        for (int i = DISTROY_NUM_SLOTS - 1; i >= 0; i--) {
-            y = distroy_block_process(&c->slots[i], y);
-        }
-    } else {
-        /* Left to right (default): slot 0 processes first, slot 7 last. */
-        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
-            y = distroy_block_process(&c->slots[i], y);
-        }
+    /* Right-to-left signal flow: slot 7 processes first, slot 0 last. */
+    for (int i = DISTROY_NUM_SLOTS - 1; i >= 0; i--) {
+        y = distroy_block_process(&c->slots[i], y);
     }
     return y;
 }

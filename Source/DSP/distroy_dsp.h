@@ -2,12 +2,10 @@
 #define DISTROY_DSP_H
 
 /* DISTROY -- an 8-slot serial chain of modeled distortion/overdrive
- * pedals, filters, and other effects for Schwung (Ableton Move) and the
- * DISTROYBOY VST3. Signal direction is toggleable: LEFT TO RIGHT by
- * default (slot 0 processes first, slot 7 processes last), reversible
- * to right-to-left -- see DistroyChain's `reverse` field and
- * distroy_chain_process(). Slot-to-knob mapping is unaffected by
- * direction (knob 1 is always slot 0); only processing order changes.
+ * pedals, filters, and other effects for Schwung (Ableton Move). Signal
+ * flows right to left across the 8 knob-mapped slots (slot index 7
+ * processes first, slot index 0 processes last -- see
+ * distroy_chain_process()).
  *
  * Each pedal/effect TYPE is a fixed, characteristic waveshaper/filter
  * plus a fixed (non-knob-controlled) coloration modeling that unit's
@@ -63,9 +61,6 @@ typedef enum {
     DISTROY_WHAM,          /* pitch shifter, weighted toward +-12 semitones */
     DISTROY_TAPE,          /* tape saturation + hiss + HF rolloff */
     DISTROY_SPKR,          /* speaker cabinet size emulation */
-    DISTROY_NOIZ,          /* white/pink/red noise generator, capped at 66% level */
-    DISTROY_TUBE,          /* vintage Russian vacuum tube saturation */
-    DISTROY_CABL,          /* broken 1/4" cable/jack simulation -- random crackle/cutout */
     DISTROY_TYPE_COUNT
 } DistroyType;
 
@@ -243,48 +238,6 @@ typedef struct {
 void noise_init(SimpleNoise *n, unsigned int seed);
 double noise_next(SimpleNoise *n); /* returns -1.0..1.0 */
 
-/* Three-colour noise generator for NOIZ. White is the raw SimpleNoise
- * above; pink uses Paul Kellet's well-known "economy" 3-pole
- * approximation (a widely reused simple/cheap pink noise filter, not a
- * theoretically exact -3dB/octave filter, but a standard reference
- * implementation for exactly this purpose); red/brown is a simple
- * leaky-integrator (heavily lowpassed white noise), rescaled back up
- * since integration attenuates amplitude a lot. */
-typedef enum { NOISE_WHITE = 0, NOISE_PINK, NOISE_RED } NoiseColour;
-
-typedef struct {
-    SimpleNoise white;
-    double pink_b0, pink_b1, pink_b2;
-    double brown_state;
-} NoiseGen;
-
-void noisegen_init(NoiseGen *n, unsigned int seed);
-double noisegen_process(NoiseGen *n, NoiseColour colour);
-
-/* Broken 1/4" cable/jack simulation for CABL -- a small state machine
- * that randomly triggers brief crackle bursts or partial cutouts at
- * random intervals, plus a subtle constant noise floor even in its
- * "normal" state (a genuinely bad cable has some baseline character
- * even when "working"). IMPORTANT: cutouts are never full silence --
- * cutoutLevel is randomized but bounded well above 0 each time, per
- * spec ("never fully off, just cutting out and filtering part or all
- * of the signal like a real malfunctioning cable would"). */
-typedef enum { CABLE_NORMAL = 0, CABLE_CRACKLE, CABLE_CUTOUT } CableState;
-
-typedef struct {
-    CableState state;
-    int stateSamplesRemaining;
-    int eventCountdown;
-    double cutoutLevel; /* how much signal survives during a cutout, never 0 */
-    SimpleNoise noise;
-    unsigned int rngState;
-} CableSim;
-
-void cablesim_init(CableSim *c, unsigned int seed);
-/* severity01: 0.0-1.0, scales how often/how harsh the glitch events
- * are (the CABL knob's meaning). */
-double cablesim_process(CableSim *c, double x, double severity01, double sample_rate);
-
 /* Look-ahead, stereo-linked "brickwall" safety limiter for the chain's
  * final output. Not part of DistroyChain itself (which is per-channel
  * mono) -- this operates on L+R together and belongs in the plugin
@@ -320,30 +273,6 @@ typedef struct {
 void brickwall_limiter_init(BrickwallLimiter *lim, double ceiling_db, double release_ms, double sample_rate);
 /* Processes one stereo sample in place. */
 void brickwall_limiter_process(BrickwallLimiter *lim, double *l, double *r);
-
-/* Battery-starve simulator -- for the VST3's power icon (9V battery)
- * feature only, not used by the Move version (which has no equivalent
- * UI to expose this). Models a guitar pedal's battery dying: reduced
- * output level, increasing "sag"/compression as headroom drops,
- * increasing amplitude wobble (unstable supply voltage), and increasing
- * noise floor -- all scaling with `amount`. At amount=1.0 this reduces
- * signal to near-total loss (deliberately, per spec -- "almost
- * disconnect power" -- unlike CABL, this one is allowed to approach
- * full silence). Stereo-linked (call once per stereo sample, apply the
- * SAME instance's output to both channels' already-mixed signal, or use
- * two instances with the same `amount` if you want independent L/R
- * noise -- the reference wrapper implementation uses one instance
- * driving both channels for a single "dying battery" character rather
- * than two independently-dying batteries). */
-typedef struct {
-    double amount;      /* 0.0 = normal, 1.0 = almost dead */
-    double lfoPhase;
-    SimpleNoise noise;
-} PowerStarve;
-
-void powerstarve_init(PowerStarve *ps, unsigned int seed);
-void powerstarve_set_amount(PowerStarve *ps, double amount01);
-double powerstarve_process(PowerStarve *ps, double x, double sample_rate);
 
 /* A single pedal slot: type + primary knob (0.0-1.0, meaning depends on
  * type's knob_mode) + per-pedal sub-parameters (Drive/Tone/Level) +
@@ -389,9 +318,7 @@ typedef struct {
     Biquad wah_filter;      /* used by DISTROY_MUTRON, DISTROY_CRYBABY */
     PitchShifter pitch;      /* used only by DISTROY_WHAM */
     SimpleDecimator decim;   /* used only by DISTROY_LOFI */
-    SimpleNoise noise;        /* used only by DISTROY_TAPE and DISTROY_TUBE */
-    NoiseGen noisegen;         /* used only by DISTROY_NOIZ */
-    CableSim cable;             /* used only by DISTROY_CABL */
+    SimpleNoise noise;        /* used only by DISTROY_TAPE */
     double sample_rate;
 } DistroyBlock;
 
@@ -399,17 +326,13 @@ void distroy_block_init(DistroyBlock *b, DistroyType type, double sample_rate);
 void distroy_block_set_type(DistroyBlock *b, DistroyType type);
 double distroy_block_process(DistroyBlock *b, double x);
 
-/* The full 8-slot chain. Signal direction is now toggleable (default
- * LEFT TO RIGHT: slot 0 processes first, slot 7 processes last) -- see
- * the `reverse` field and distroy_chain_process(). Slot-to-knob mapping
- * never changes (knob 1 is always slot 0); only which slot's effect
- * gets applied to the signal FIRST changes with direction. */
+/* The full 8-slot chain. slots[7] processes first, slots[0] processes
+ * last (right-to-left signal flow per the project spec). */
 #define DISTROY_NUM_SLOTS 8
 
 typedef struct {
     DistroyBlock slots[DISTROY_NUM_SLOTS];
     double sample_rate;
-    int reverse; /* 0 = left-to-right (default), 1 = right-to-left */
 } DistroyChain;
 
 void distroy_chain_init(DistroyChain *c, double sample_rate);

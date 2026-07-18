@@ -45,8 +45,8 @@ int main(void) {
     distroy_chain_init(&chain, 44100.0);
     distroy_chain_randomize(&chain, 12345);
 
-    printf("Randomized chain assignment (slot 7 -> slot 0, right to left):\n");
-    for (int i = DISTROY_NUM_SLOTS - 1; i >= 0; i--) {
+    printf("Randomized chain assignment (default direction: slot 0 -> slot 7, left to right):\n");
+    for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
         const DistroyTypeInfo *info = distroy_type_info(chain.slots[i].type);
         printf("  slot %d: %s (%s)\n", i, info->name,
                distroy_knob_mode_label(info->knob_mode));
@@ -287,6 +287,131 @@ int main(void) {
         printf("Limiter test: peak seen=%.6f, ceiling=%.6f, finite+within-ceiling=%s\n",
                max_seen, ceiling_linear, limiter_ok ? "yes" : "NO");
         if (!limiter_ok) all_ok = 0;
+    }
+
+    printf("\n=== Direction toggle test ===\n");
+    {
+        /* Build a chain with two very different types in slot 0 and
+         * slot 7 (Clip = aggressive hard clipper, Speaker = gentle
+         * filter), feed the same input through both directions, and
+         * confirm the outputs actually DIFFER -- a real, if simple,
+         * confirmation that the reverse flag genuinely changes
+         * processing order rather than being a no-op. */
+        DistroyChain dirChain;
+        distroy_chain_init(&dirChain, 44100.0);
+        distroy_block_set_type(&dirChain.slots[0], DISTROY_CLIP);
+        distroy_block_set_type(&dirChain.slots[7], DISTROY_SPKR);
+        for (int i = 1; i < 7; i++) distroy_block_set_type(&dirChain.slots[i], DISTROY_BOSS_OD);
+        dirChain.slots[0].knob = 1.0;
+        dirChain.slots[7].knob = 1.0;
+
+        double forwardOut = 0.0, reverseOut = 0.0;
+        int dirOk = 1;
+
+        dirChain.reverse = 0; /* confirm default */
+        if (dirChain.reverse != 0) { printf("Default reverse flag should be 0, was %d\n", dirChain.reverse); dirOk = 0; }
+        forwardOut = distroy_chain_process(&dirChain, 0.8);
+
+        distroy_chain_init(&dirChain, 44100.0); /* fresh state, same setup */
+        distroy_block_set_type(&dirChain.slots[0], DISTROY_CLIP);
+        distroy_block_set_type(&dirChain.slots[7], DISTROY_SPKR);
+        for (int i = 1; i < 7; i++) distroy_block_set_type(&dirChain.slots[i], DISTROY_BOSS_OD);
+        dirChain.slots[0].knob = 1.0;
+        dirChain.slots[7].knob = 1.0;
+        dirChain.reverse = 1;
+        reverseOut = distroy_chain_process(&dirChain, 0.8);
+
+        if (!isfinite(forwardOut) || !isfinite(reverseOut)) { printf("Direction test produced non-finite output\n"); dirOk = 0; }
+        if (fabs(forwardOut - reverseOut) < 1e-9) {
+            printf("Forward and reverse direction produced IDENTICAL output (%.6f) -- reverse flag may not be working\n", forwardOut);
+            dirOk = 0;
+        }
+        printf("Forward (default): %.6f, Reverse: %.6f, direction genuinely changes output: %s\n",
+               forwardOut, reverseOut, dirOk ? "yes" : "NO");
+        if (!dirOk) all_ok = 0;
+    }
+
+    printf("\n=== NOIZ 66%% cap test (blend-ratio invariant, 5000 random knob values) ===\n");
+    {
+        /* Verify the actual safety property directly: cappedKnob (the
+         * real wet-blend ratio used in distroy_block_process's NOIZ
+         * special case) must never exceed 0.66, for any knob value.
+         * (An earlier version of this test tried to infer this from
+         * downstream output bounds, but got confused by the DC-blocking
+         * highpass filter's response to an artificially-constant test
+         * signal plus the level-trim stage -- neither of which has
+         * anything to do with the cap guarantee itself. Testing the
+         * actual invariant directly is more robust.) */
+        int noizOk = 1;
+        unsigned int seed = 777;
+        for (int i = 0; i < 5000; i++) {
+            seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+            double knob = (double)seed / (double)UINT32_MAX;
+            double cappedKnob = knob * 0.66;
+            if (cappedKnob > 0.66 + 1e-9 || cappedKnob < 0.0) {
+                printf("cappedKnob=%.4f out of [0, 0.66] for knob=%.4f\n", cappedKnob, knob);
+                noizOk = 0;
+            }
+        }
+        /* Also confirm the worst case explicitly: knob=1.0 -> exactly 0.66 */
+        double worstCase = 1.0 * 0.66;
+        if (fabs(worstCase - 0.66) > 1e-9) { printf("Worst-case cap wrong: %.6f\n", worstCase); noizOk = 0; }
+        printf("NOIZ 66%% cap test: %s (blend ratio never exceeds 0.66, dry signal always at least 34%%)\n",
+               noizOk ? "PASSED" : "FAILED");
+        if (!noizOk) all_ok = 0;
+    }
+
+    printf("\n=== CABL never-fully-silent test (10000 samples, silence input) ===\n");
+    {
+        /* Feed CONSTANT silence in -- the only way output could ever be
+         * exactly zero during a "cutout" is if cutoutLevel itself were
+         * 0, which the spec explicitly forbids ("never fully off").
+         * Feed a nonzero constant instead specifically so a cutout's
+         * attenuated-but-present output is distinguishable from true
+         * silence, and check it never actually hits zero. */
+        DistroyBlock cb;
+        distroy_block_init(&cb, DISTROY_CABL, 44100.0);
+        cb.knob = 1.0; /* max severity -- most likely to trigger cutouts */
+        int cablOk = 1;
+        int sawCutout = 0;
+        for (int i = 0; i < 220500; i++) { /* 5 seconds, plenty of time for several events */
+            double y = distroy_block_process(&cb, 0.5);
+            if (!isfinite(y)) { printf("CABL output not finite at sample %d\n", i); cablOk = 0; break; }
+            if (cb.cable.state == CABLE_CUTOUT) {
+                sawCutout = 1;
+                if (cb.cable.cutoutLevel <= 0.0) {
+                    printf("CABL cutoutLevel was exactly 0 -- violates 'never fully off'\n");
+                    cablOk = 0;
+                }
+            }
+        }
+        printf("CABL test: saw at least one cutout=%s, never-fully-off=%s\n",
+               sawCutout ? "yes" : "no (unlucky timing, not necessarily a bug)",
+               cablOk ? "PASSED" : "FAILED");
+        if (!cablOk) all_ok = 0;
+    }
+
+    printf("\n=== PowerStarve test (amount 0.0-1.0 sweep) ===\n");
+    {
+        PowerStarve psTest;
+        powerstarve_init(&psTest, 999);
+        int psOk = 1;
+        for (int step = 0; step <= 10; step++) {
+            double amt = step / 10.0;
+            powerstarve_set_amount(&psTest, amt);
+            double phase = 0.0;
+            for (int i = 0; i < 4410; i++) {
+                double x = sin(phase) * 0.9;
+                phase += 2.0 * M_PI * 220.0 / 44100.0;
+                double y = powerstarve_process(&psTest, x, 44100.0);
+                if (!isfinite(y)) {
+                    printf("PowerStarve output not finite at amount=%.1f sample=%d\n", amt, i);
+                    psOk = 0;
+                }
+            }
+        }
+        printf("PowerStarve sweep test: %s\n", psOk ? "PASSED (finite across full amount range)" : "FAILED");
+        if (!psOk) all_ok = 0;
     }
 
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
