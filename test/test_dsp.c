@@ -244,6 +244,51 @@ int main(void) {
         if (violation) all_ok = 0;
     }
 
+    printf("\n=== Brickwall limiter safety test ===\n");
+    {
+        BrickwallLimiter lim;
+        double ceiling_db = -1.0;
+        brickwall_limiter_init(&lim, ceiling_db, 80.0, 44100.0);
+        double ceiling_linear = pow(10.0, ceiling_db / 20.0);
+
+        int limiter_ok = 1;
+        double max_seen = 0.0;
+        /* Worst case: feed it the loudest, most extreme chain output we
+         * can construct -- Metal (heavy clip) into Rekt (rectify) at
+         * max drive, deliberately overdriven well past unity, to make
+         * sure the limiter actually catches real worst-case chain
+         * output, not just a synthetic test tone. */
+        DistroyBlock metal, rekt;
+        distroy_block_init(&metal, DISTROY_METAL, 44100.0);
+        distroy_block_init(&rekt, DISTROY_REKT, 44100.0);
+        metal.knob = 1.0; metal.sub_drive = 1.0;
+        rekt.knob = 1.0; rekt.sub_drive = 1.0;
+
+        double phase = 0.0;
+        for (int i = 0; i < 44100; i++) { /* 1 full second */
+            double x = sin(phase) * 1.5; /* deliberately over-driven input, beyond +-1.0 */
+            phase += 2.0 * M_PI * 440.0 / 44100.0;
+            double y = distroy_block_process(&metal, x);
+            y = distroy_block_process(&rekt, y);
+            double l = y, r = y;
+            brickwall_limiter_process(&lim, &l, &r);
+            if (!isfinite(l) || !isfinite(r)) {
+                printf("Limiter output NOT FINITE at sample %d\n", i);
+                limiter_ok = 0;
+            }
+            if (fabs(l) > ceiling_linear + 1e-9 || fabs(r) > ceiling_linear + 1e-9) {
+                printf("Limiter ceiling VIOLATED at sample %d: l=%.6f r=%.6f (ceiling=%.6f)\n",
+                       i, l, r, ceiling_linear);
+                limiter_ok = 0;
+            }
+            if (fabs(l) > max_seen) max_seen = fabs(l);
+            if (fabs(r) > max_seen) max_seen = fabs(r);
+        }
+        printf("Limiter test: peak seen=%.6f, ceiling=%.6f, finite+within-ceiling=%s\n",
+               max_seen, ceiling_linear, limiter_ok ? "yes" : "NO");
+        if (!limiter_ok) all_ok = 0;
+    }
+
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
     return all_ok ? 0 : 1;
 }

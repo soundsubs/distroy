@@ -36,7 +36,7 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_REKT]         = { "Rekt",          "REKT",   DISTROY_KNOB_WET_DRY },
     [DISTROY_WHAM]         = { "Wham",          "WHAM",   DISTROY_KNOB_WET_DRY },
     [DISTROY_TAPE]         = { "Tape",          "TAPE",   DISTROY_KNOB_WET_DRY },
-    [DISTROY_SPKR]         = { "Speaker",       "SPKR",   DISTROY_KNOB_CUTOFF },
+    [DISTROY_SPKR]         = { "Speaker",       "SPKR",   DISTROY_KNOB_SIZE },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
@@ -49,6 +49,7 @@ const char* distroy_knob_mode_label(DistroyKnobMode mode) {
         case DISTROY_KNOB_GAIN: return "GAIN";
         case DISTROY_KNOB_CUTOFF: return "CUTOFF";
         case DISTROY_KNOB_SENS: return "SENS";
+        case DISTROY_KNOB_SIZE: return "SIZE";
         default: return "MIX";
     }
 }
@@ -387,6 +388,71 @@ double noise_next(SimpleNoise *n) {
 }
 
 /* ---------------------------------------------------------------------
+ * Brickwall limiter (stereo-linked, look-ahead) -- see header comment.
+ * ------------------------------------------------------------------- */
+
+void brickwall_limiter_init(BrickwallLimiter *lim, double ceiling_db, double release_ms, double sample_rate) {
+    for (int i = 0; i < LIMITER_LOOKAHEAD_SAMPLES; i++) {
+        lim->delay_l[i] = 0.0;
+        lim->delay_r[i] = 0.0;
+        lim->peak_window[i] = 0.0;
+    }
+    lim->write_pos = 0;
+    lim->gain = 1.0;
+    lim->ceiling = pow(10.0, ceiling_db / 20.0);
+    lim->release_coeff = exp(-1.0 / (0.001 * release_ms * sample_rate));
+}
+
+void brickwall_limiter_process(BrickwallLimiter *lim, double *l, double *r) {
+    double in_l = *l;
+    double in_r = *r;
+    double peak_now = fabs(in_l);
+    if (fabs(in_r) > peak_now) peak_now = fabs(in_r);
+
+    lim->delay_l[lim->write_pos] = in_l;
+    lim->delay_r[lim->write_pos] = in_r;
+    lim->peak_window[lim->write_pos] = peak_now;
+
+    /* True-peak-ish lookahead: scan the WHOLE window for its max, not
+     * just the instantaneous sample, so a sharp transient anywhere in
+     * the next ~2.9ms is already accounted for before it reaches the
+     * output. O(128) per sample is trivial next to the filter chains
+     * already running per-sample elsewhere in this project. */
+    double max_peak = 0.0;
+    for (int i = 0; i < LIMITER_LOOKAHEAD_SAMPLES; i++) {
+        if (lim->peak_window[i] > max_peak) max_peak = lim->peak_window[i];
+    }
+
+    double target_gain = (max_peak > lim->ceiling) ? (lim->ceiling / max_peak) : 1.0;
+
+    if (target_gain < lim->gain) {
+        /* Instant attack -- safe specifically because the lookahead
+         * already "saw this peak coming" before it reaches the output
+         * (the delayed sample it'll be applied to hasn't been output
+         * yet). A no-lookahead limiter couldn't safely do this. */
+        lim->gain = target_gain;
+    } else {
+        lim->gain = lim->release_coeff * lim->gain + (1.0 - lim->release_coeff) * target_gain;
+    }
+
+    int read_pos = (lim->write_pos + 1) % LIMITER_LOOKAHEAD_SAMPLES;
+    double out_l = lim->delay_l[read_pos] * lim->gain;
+    double out_r = lim->delay_r[read_pos] * lim->gain;
+
+    lim->write_pos = (lim->write_pos + 1) % LIMITER_LOOKAHEAD_SAMPLES;
+
+    /* Final hard clamp -- the actual safety guarantee regardless of
+     * anything above. This is what makes it a real "brickwall": output
+     * NEVER exceeds ceiling, full stop, even in some edge case the
+     * smoothed gain path didn't fully catch. */
+    out_l = clampd(out_l, -lim->ceiling, lim->ceiling);
+    out_r = clampd(out_r, -lim->ceiling, lim->ceiling);
+
+    *l = out_l;
+    *r = out_r;
+}
+
+/* ---------------------------------------------------------------------
  * Waveshaping primitives
  * ------------------------------------------------------------------- */
 
@@ -709,18 +775,24 @@ static double type_process(DistroyBlock *b, double x, double drive) {
             return y + hiss;
         }
         case DISTROY_SPKR: {
-            /* CUTOFF-mode: "drive" here is the knob value = speaker
-             * size, 0=small/bright, 1=large/full. Reuses color_hs/
-             * color_lp/color_peak (already-existing generic fields) as
-             * the HPF/LPF/resonance-bump stages, no new struct fields
-             * needed. */
+            /* SIZE-mode: "drive" here is the knob value, 0=impossibly
+             * small (cell-phone-speaker tinny) to 1=impossibly large
+             * (2-foot-woofer boomy). Reuses color_hs/color_lp/
+             * color_peak (already-existing generic fields) as the
+             * HPF/LPF/resonance-bump stages, no new struct fields
+             * needed. Range deliberately extreme per spec ("impossibly
+             * small... to impossibly large"), not a realistic speaker
+             * range -- earlier version (80-300Hz HP / 3.5-6kHz LP) was
+             * too subtle to hear clearly. */
             double size = drive;
-            double hp_cutoff = 300.0 - size * 220.0;
-            double lp_cutoff = 6000.0 - size * 2500.0;
-            double peak_freq = 150.0 - size * 80.0;
+            double hp_cutoff = 900.0 - size * 880.0;   /* 900Hz (phone) -> 20Hz (huge woofer) */
+            double lp_cutoff = 5000.0 - size * 3700.0; /* 5000Hz (tinny) -> 1300Hz (dark/boomy) */
+            double peak_freq = 2200.0 - size * 2140.0; /* 2200Hz (tinny peak) -> 60Hz (boom peak) */
+            double peak_q = 2.5 - size * 1.3;          /* sharper tinny resonance -> looser boomy resonance */
+            double peak_gain = 4.0 + size * 2.0;
             onepole_set_highpass(&b->color_hs, hp_cutoff, b->sample_rate);
             onepole_set_lowpass(&b->color_lp, lp_cutoff, b->sample_rate);
-            biquad_set_peaking(&b->color_peak, peak_freq, 1.5, 4.0, b->sample_rate);
+            biquad_set_peaking(&b->color_peak, peak_freq, peak_q, peak_gain, b->sample_rate);
             double y = onepole_process(&b->color_hs, x);
             y = onepole_process(&b->color_lp, y);
             return biquad_process(&b->color_peak, y);
@@ -748,7 +820,7 @@ double distroy_block_process(DistroyBlock *b, double x) {
         wet = type_process(b, x, b->sub_drive);
         out = x * (1.0 - b->knob) + wet * b->knob;
     } else {
-        /* GAIN, CUTOFF, and SENS modes all pass the knob straight
+        /* GAIN, CUTOFF, SENS, and SIZE modes all pass the knob straight
          * through and are fully wet (no dry blend) -- see type_process
          * for how each mode interprets this argument (drive, cutoff
          * frequency, or envelope sensitivity respectively). */

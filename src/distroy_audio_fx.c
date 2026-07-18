@@ -94,6 +94,8 @@ typedef struct {
     unsigned int randomize_counter; /* mixed into the seed so repeated
                                         triggers within the same second
                                         still produce different results */
+    BrickwallLimiter limiter; /* safety limiter on the final stereo
+                                  output -- see distroy_dsp.h for design */
 } DistroyInstance;
 
 static double clampd(double x, double lo, double hi) {
@@ -126,6 +128,7 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     inst->randomize_counter = 0;
     distroy_chain_init(&inst->left, inst->sample_rate);
     distroy_chain_init(&inst->right, inst->sample_rate);
+    brickwall_limiter_init(&inst->limiter, -1.0, 80.0, inst->sample_rate);
 
     /* Random 8-pedal chain AND random knob values on instantiation. */
     randomize_everything(inst);
@@ -148,9 +151,19 @@ static void process_block(void *instance, int16_t *audio_inout, int frames) {
         l = distroy_chain_process(&inst->left, l);
         r = distroy_chain_process(&inst->right, r);
 
-        /* Safety limiter: distortion stages can exceed unity internally
-         * (see test_dsp.c peak measurements, up to ~1.4 on Fuzz) --
-         * clamp hard here rather than let it wrap/alias on int16 write. */
+        /* Brickwall safety limiter: stereo-linked, look-ahead, replaces
+         * the old bare hard-clamp-to-int16-range (which worked but
+         * clipped instantly/harshly with no smoothing whenever engaged
+         * -- distortion stages can exceed unity internally, see
+         * test_dsp.c peak measurements, up to ~1.4-1.8 on some types).
+         * See distroy_dsp.h's BrickwallLimiter for the full design;
+         * ceiling is -1dBFS. */
+        brickwall_limiter_process(&inst->limiter, &l, &r);
+
+        /* Final int16-range clamp: purely a belt-and-suspenders safety
+         * net for the int16 conversion itself -- the limiter's -1dBFS
+         * ceiling already keeps l/r well inside [-1,1], so this should
+         * never actually engage in practice. */
         double lo = clampd(l * 32767.0, -32768.0, 32767.0);
         double ro = clampd(r * 32767.0, -32768.0, 32767.0);
 

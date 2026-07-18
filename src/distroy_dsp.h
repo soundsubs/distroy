@@ -68,7 +68,8 @@ typedef enum {
     DISTROY_KNOB_GAIN = 0,
     DISTROY_KNOB_WET_DRY,
     DISTROY_KNOB_CUTOFF,
-    DISTROY_KNOB_SENS      /* auto-wah envelope sensitivity/depth */
+    DISTROY_KNOB_SENS,     /* auto-wah envelope sensitivity/depth */
+    DISTROY_KNOB_SIZE      /* speaker cabinet size sweep */
 } DistroyKnobMode;
 
 typedef struct {
@@ -236,6 +237,42 @@ typedef struct {
 
 void noise_init(SimpleNoise *n, unsigned int seed);
 double noise_next(SimpleNoise *n); /* returns -1.0..1.0 */
+
+/* Look-ahead, stereo-linked "brickwall" safety limiter for the chain's
+ * final output. Not part of DistroyChain itself (which is per-channel
+ * mono) -- this operates on L+R together and belongs in the plugin
+ * wrapper (distroy_audio_fx.c / PluginProcessor.cpp), called once per
+ * sample after both channels have run through their own chains.
+ *
+ * Design: delays the signal by a short lookahead window
+ * (LIMITER_LOOKAHEAD_SAMPLES, ~2.9ms at 44100Hz) while scanning that
+ * same window for its true peak (max abs(L,R) across the whole
+ * window, not just the instantaneous sample) -- this means gain
+ * reduction can be computed and smoothed toward BEFORE a peak actually
+ * reaches the output, avoiding the harsh instant-clip character a
+ * naive no-lookahead limiter or hard clamp alone would have (which is
+ * what this project relied on previously). Attack is effectively
+ * instant (safe specifically because the lookahead already "saw the
+ * peak coming"); release is a smooth, program-dependent ramp back
+ * toward unity gain. A final hard clamp to the ceiling remains as an
+ * absolute backstop regardless of what the smoothed gain path does --
+ * this is the actual safety guarantee ("so we don't hurt people"),
+ * with the lookahead/smoothing on top purely for transparency. */
+#define LIMITER_LOOKAHEAD_SAMPLES 128
+
+typedef struct {
+    double delay_l[LIMITER_LOOKAHEAD_SAMPLES];
+    double delay_r[LIMITER_LOOKAHEAD_SAMPLES];
+    double peak_window[LIMITER_LOOKAHEAD_SAMPLES];
+    int write_pos;
+    double gain; /* current smoothed gain, <= 1.0 */
+    double ceiling; /* linear, e.g. 0.891 for -1dBFS */
+    double release_coeff;
+} BrickwallLimiter;
+
+void brickwall_limiter_init(BrickwallLimiter *lim, double ceiling_db, double release_ms, double sample_rate);
+/* Processes one stereo sample in place. */
+void brickwall_limiter_process(BrickwallLimiter *lim, double *l, double *r);
 
 /* A single pedal slot: type + primary knob (0.0-1.0, meaning depends on
  * type's knob_mode) + per-pedal sub-parameters (Drive/Tone/Level) +

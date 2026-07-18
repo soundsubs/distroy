@@ -30,7 +30,7 @@ processes first, knob 1 processes last).
 | Rekt | Wet/Dry | Hard clip + full-wave rectify -- harsh, pitched-up buzz |
 | Wham | Wet/Dry | Pitch shifter, weighted toward +-12 semitones, never 0 |
 | Tape | Wet/Dry | Tape saturation + subtle hiss + HF rolloff |
-| Speaker | Cutoff | Speaker cabinet size emulation (small/bright <-> large/full) |
+| Speaker | Size | Speaker cabinet size (v0.5.1: impossibly small/tinny <-> impossibly large/boomy) |
 
 **All distortion-type pedals use Wet/Dry (v0.4.3+)** — every knob
 defaults to 50% and uniformly means "how much of the effect is blended
@@ -56,8 +56,15 @@ pedal input to model a manually-swept wah.
   Whammy pedal's own character.
 - **Speaker:** models the frequency-response coloration of speaker size
   (highpass/lowpass corner + resonant cone-frequency bump, all
-  size-linked to the Cutoff knob) rather than a full impulse-response
-  cabinet simulation.
+  size-linked to its own dedicated Size knob mode) rather than a full
+  impulse-response cabinet simulation. **v0.5.1:** the original range
+  (80-300Hz HP / 3.5-6kHz LP) was too subtle to hear clearly — widened
+  to a deliberately extreme "impossibly small (cell-phone-tinny) to
+  impossibly large (2-foot-woofer-boomy)" sweep (900Hz-20Hz HP,
+  5000Hz-1300Hz LP, plus a resonant peak that moves from a sharp 2.2kHz
+  "tinny" bump down to a loose 60Hz "boom" bump), per direct listening
+  feedback. Also got its own `SIZE` knob-mode label (previously
+  generic `CUTOFF`, shared with the actual filters).
 
 **Why the filters were added:** a chain of 8 distortion stages tends to
 compound gain fast enough that everything collapses into a clipped
@@ -148,6 +155,24 @@ schema. For now, these three are randomized but not live-editable.
 Verified via a dedicated stress test (`make test`): all 8 pedal types ×
 8 corner-case combinations of Drive/Tone/Level at their extremes (0.0
 and 1.0) produce finite output.
+
+## Output safety limiter (v0.6.0)
+
+A stereo-linked, look-ahead brickwall limiter now runs on the final
+chain output, replacing what used to be a bare hard clamp to the int16
+range. Design: delays the signal by ~2.9ms (128 samples @44.1kHz) while
+scanning that same window for its true peak, so gain reduction can be
+computed and smoothed *before* a peak actually reaches the output —
+attack is effectively instant (safe specifically because the lookahead
+already "saw the peak coming"), release is a smooth 80ms ramp back
+toward unity. A final hard clamp to the -1dBFS ceiling remains as an
+absolute backstop regardless of what the smoothed path does — this is
+the actual safety guarantee, with the lookahead/smoothing on top purely
+for transparency (so it doesn't sound like harsh clipping every time it
+engages). Verified via a dedicated worst-case test: Metal into Rekt at
+max drive, fed a deliberately overdriven 1.5x-amplitude input for a
+full second — output never exceeded the ceiling, stayed finite
+throughout.
 
 ## Status
 
