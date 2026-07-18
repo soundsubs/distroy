@@ -2,20 +2,21 @@
 #define DISTROY_DSP_H
 
 /* DISTROY -- an 8-slot serial chain of modeled distortion/overdrive
- * pedals AND resonant filters for Schwung (Ableton Move). Signal flows
- * right to left across the 8 knob-mapped slots (slot index 7 processes
- * first, slot index 0 processes last -- see distroy_chain_process()).
+ * pedals, filters, and other effects for Schwung (Ableton Move). Signal
+ * flows right to left across the 8 knob-mapped slots (slot index 7
+ * processes first, slot index 0 processes last -- see
+ * distroy_chain_process()).
  *
- * Each pedal/filter TYPE is a fixed, characteristic waveshaper/filter
+ * Each pedal/effect TYPE is a fixed, characteristic waveshaper/filter
  * plus a fixed (non-knob-controlled) coloration modeling that unit's
  * tonal signature. Per the project spec, each slot exposes exactly ONE
- * knob-controlled parameter: GAIN (drive amount), WET_DRY (blend), or
- * for the two filter types, CUTOFF (filter frequency) -- see
- * DISTROY_KNOB_MODE below and distroy_type_info().
+ * knob-controlled parameter: GAIN (drive amount), WET_DRY (blend),
+ * CUTOFF (filter frequency), or SENS (auto-wah envelope sensitivity)
+ * -- see DISTROY_KNOB_MODE below and distroy_type_info().
  *
  * KNOWN SIMPLIFICATION: these are characteristic circuit-topology
  * approximations (soft/hard clipping curves + coloration filters tuned
- * by ear/reference to each pedal's known character), not
+ * by ear/reference to each unit's known character), not
  * component-level SPICE-accurate models. WMD Geiger Counter in
  * particular is modeled only for its aggressive fuzz/clipping
  * character -- its sequencer/gate/pattern features are out of scope
@@ -23,8 +24,12 @@
  * Moog ladder filter uses the well-known Stilson/Smith discrete
  * approximation (see MoogLadder below); the Korg-style filter pair is
  * a characterful approximation of the MS-20's resonant/self-saturating
- * HPF->LPF behavior, not a literal transcription of its analog
- * topology (see Korg35HP/Korg35LP below).
+ * HPF->LPF behavior. The Mu-Tron/Cry Baby types model the classic
+ * envelope-follower auto-wah behavior rather than a foot-pedal-swept
+ * wah, since there's no expression pedal input in this architecture.
+ * WHAM's pitch shifter is a time-domain granular dual-tap technique,
+ * not FFT-based, so some grain artifacts are expected at extreme
+ * ratios (not unlike a real Whammy pedal's own character).
  */
 
 #include <stdint.h>
@@ -45,13 +50,25 @@ typedef enum {
     DISTROY_GEIGER_COUNTER,
     DISTROY_MOOG_LADDER,   /* 4-pole resonant lowpass with input drive */
     DISTROY_KORG_MS20,     /* resonant HPF -> resonant LPF, each self-saturating */
+    DISTROY_MUTRON,        /* envelope-following auto-wah, smooth/rounded character */
+    DISTROY_CRYBABY,       /* envelope-following auto-wah, narrower/more vocal character */
+    DISTROY_JENSEN,        /* transformer saturation, bright/extended */
+    DISTROY_LUNDAHL,       /* transformer saturation, darker/more colored */
+    DISTROY_LOFI,          /* random bit depth (1-15) + sample rate (100-10000Hz) crush */
+    DISTROY_FZ1W,          /* Boss FZ-1W Waza Craft -- tighter, more symmetric fuzz */
+    DISTROY_CLIP,          /* bare hard clipper */
+    DISTROY_REKT,          /* hard clip + full-wave rectify */
+    DISTROY_WHAM,          /* pitch shifter, weighted toward +-12 semitones */
+    DISTROY_TAPE,          /* tape saturation + hiss + HF rolloff */
+    DISTROY_SPKR,          /* speaker cabinet size emulation */
     DISTROY_TYPE_COUNT
 } DistroyType;
 
 typedef enum {
     DISTROY_KNOB_GAIN = 0,
     DISTROY_KNOB_WET_DRY,
-    DISTROY_KNOB_CUTOFF
+    DISTROY_KNOB_CUTOFF,
+    DISTROY_KNOB_SENS      /* auto-wah envelope sensitivity/depth */
 } DistroyKnobMode;
 
 typedef struct {
@@ -82,6 +99,11 @@ typedef struct {
 } Biquad;
 
 void biquad_set_peaking(Biquad *f, double freq_hz, double q, double gain_db, double sample_rate);
+/* Constant-skirt-gain bandpass (RBJ cookbook) -- used by the auto-wah
+ * types, recomputed per-sample as the envelope follower sweeps the
+ * center frequency (same "retune every call" pattern as Rat's
+ * drive-linked lowpass). */
+void biquad_set_bandpass(Biquad *f, double freq_hz, double q, double sample_rate);
 double biquad_process(Biquad *f, double x);
 
 /* Tilt EQ -- a single "Tone" control that blends between bass-boost/
@@ -156,6 +178,65 @@ void korg35hp_init(Korg35HP *f, double sample_rate);
 void korg35hp_set(Korg35HP *f, double cutoff_hz, double resonance01, double drive01);
 double korg35hp_process(Korg35HP *f, double x);
 
+/* Envelope follower -- fast attack, slower release, standard asymmetric
+ * one-pole peak detector. Drives the auto-wah filter sweep (Mu-Tron,
+ * Cry Baby 535Q). */
+typedef struct {
+    double envelope;
+    double attack_coeff;
+    double release_coeff;
+} EnvelopeFollower;
+
+void envfollow_init(EnvelopeFollower *e, double attack_ms, double release_ms, double sample_rate);
+double envfollow_process(EnvelopeFollower *e, double x);
+
+/* Time-domain granular pitch shifter -- two read taps into a circular
+ * buffer, each advancing at a rate offset from the write rate by the
+ * target pitch ratio, permanently kept a half-window apart and
+ * triangle-crossfaded so one fades in as the other fades out. This is
+ * a well-established simple pitch-shifting technique (time-domain
+ * dual-tap granular resampling), not FFT-based -- expect some grain
+ * artifacts at extreme ratios, which is honestly in keeping with how a
+ * real Whammy-style pedal sounds too. */
+#define PITCHSHIFT_BUFFER_SIZE 4096
+#define PITCHSHIFT_WINDOW 2048.0
+typedef struct {
+    double buffer[PITCHSHIFT_BUFFER_SIZE];
+    int write_pos;
+    double read_offset1;
+    double read_offset2;
+    double ratio; /* playback rate ratio, 2^(semitones/12) */
+} PitchShifter;
+
+void pitchshift_init(PitchShifter *ps);
+void pitchshift_set_semitones(PitchShifter *ps, double semitones);
+double pitchshift_process(PitchShifter *ps, double x);
+
+/* Sample-and-hold decimator + linear bit-depth quantizer, used by LOFI.
+ * Compact standalone version of the same decimation/quantization
+ * technique used in the EMAX_FX project (a different Schwung module),
+ * simplified since LOFI doesn't need the analog-modeled anti-aliasing/
+ * reconstruction filter chain EMAX_FX has -- just the crush character. */
+typedef struct {
+    double held_value;
+    double phase;
+} SimpleDecimator;
+
+void decimator_init(SimpleDecimator *d);
+double decimator_process(SimpleDecimator *d, double x, double target_hz, double host_sample_rate);
+double quantize_bits(double x, int bits);
+
+/* Minimal xorshift noise generator -- used for TAPE's hiss. Same
+ * algorithm family as the chain's own randomization RNG, just a
+ * separate per-block instance so audio-rate noise doesn't perturb the
+ * chain-randomization sequence. */
+typedef struct {
+    unsigned int state;
+} SimpleNoise;
+
+void noise_init(SimpleNoise *n, unsigned int seed);
+double noise_next(SimpleNoise *n); /* returns -1.0..1.0 */
+
 /* A single pedal slot: type + primary knob (0.0-1.0, meaning depends on
  * type's knob_mode) + per-pedal sub-parameters (Drive/Tone/Level) +
  * internal filter state.
@@ -163,17 +244,25 @@ double korg35hp_process(Korg35HP *f, double x);
  * SUB-PARAMETERS (Drive, Tone, Level): every real pedal has more than
  * one control -- a Tubescreamer has Overdrive/Tone/Level, a Big Muff
  * has Sustain/Tone/Volume, etc. DISTROY only has one physical knob per
- * slot (already spoken for by the primary GAIN/WET_DRY control), so
- * these sub-parameters are randomized once per chain load (see
+ * slot (already spoken for by the primary knob-controlled parameter),
+ * so these sub-parameters are randomized once per chain load (see
  * distroy_chain_randomize_all()) rather than knob-controlled -- live
  * submenu editing of these is a separate, not-yet-implemented UI
  * question (see README).
  *
- * For GAIN-mode types, the primary knob IS the drive amount, so
- * sub_drive is unused (harmless to still randomize). For WET_DRY-mode
- * types, sub_drive replaces what used to be a fixed NOMINAL_DRIVE
- * constant -- now genuinely randomized per load, giving real variety
- * even among same-type pedals across different sessions. */
+ * For GAIN/CUTOFF/SENS-mode types, the primary knob IS the main
+ * control, so sub_drive is unused by the mixing logic (harmless to
+ * still randomize). For WET_DRY-mode types, sub_drive replaces what
+ * used to be a fixed constant -- genuinely randomized per load.
+ *
+ * REPURPOSED sub-parameters (type-specific meaning, not Drive/Tone):
+ *   Moog Ladder, Korg MS-20: sub_tone = Resonance (always 0 on
+ *     randomize -- see distroy_chain_randomize_all(), high resonance
+ *     on these can howl badly)
+ *   LOFI: sub_drive = bit depth encode (1-15 bits), sub_tone = sample
+ *     rate encode (100-10000 Hz) -- see type_process()
+ *   WHAM: sub_drive = semitone shift encode (weighted toward +-12,
+ *     never 0) -- see type_process() */
 typedef struct {
     DistroyType type;
     double knob;        /* 0.0-1.0, meaning depends on type's knob_mode */
@@ -188,6 +277,11 @@ typedef struct {
     MoogLadder moog;      /* used only by DISTROY_MOOG_LADDER */
     Korg35HP korg_hp;      /* used only by DISTROY_KORG_MS20 */
     Korg35LP korg_lp;      /* used only by DISTROY_KORG_MS20 */
+    EnvelopeFollower env;   /* used by DISTROY_MUTRON, DISTROY_CRYBABY */
+    Biquad wah_filter;      /* used by DISTROY_MUTRON, DISTROY_CRYBABY */
+    PitchShifter pitch;      /* used only by DISTROY_WHAM */
+    SimpleDecimator decim;   /* used only by DISTROY_LOFI */
+    SimpleNoise noise;        /* used only by DISTROY_TAPE */
     double sample_rate;
 } DistroyBlock;
 

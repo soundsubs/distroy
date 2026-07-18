@@ -102,7 +102,7 @@ int main(void) {
             }
         }
     }
-    printf("Sub-parameter stress test (8 corners x 8 types): finite=%s\n", subparam_ok ? "yes" : "NO");
+    printf("Sub-parameter stress test (8 corners x %d types): finite=%s\n", DISTROY_TYPE_COUNT, subparam_ok ? "yes" : "NO");
     if (!subparam_ok) all_ok = 0;
 
     printf("\n=== Moog/Korg worst-case test: max cutoff + max resonance together ===\n");
@@ -180,6 +180,69 @@ int main(void) {
     }
     printf("Moog/Korg resonance-always-zero check: %s\n", cap_violated ? "FAILED" : "PASSED (always exactly 0 in 1000 chains)");
     if (cap_violated) all_ok = 0;
+
+    printf("\n=== WHAM semitone constraint check (10000 samples of decode_wham_semitone) ===\n");
+    {
+        /* decode_wham_semitone is static in distroy_dsp.c, so test it
+         * indirectly via WHAM blocks across many randomized seeds and
+         * checking the resulting pitch ratio never corresponds to 0
+         * semitones (ratio == 1.0), and tallying how often it lands on
+         * the weighted +-12 buckets. */
+        int zero_found = 0;
+        int plus12 = 0, minus12 = 0, other = 0;
+        int wham_count = 0;
+        for (unsigned int seed = 1; seed <= 2000; seed++) {
+            DistroyChain c5;
+            distroy_chain_init(&c5, 44100.0);
+            distroy_chain_randomize_all(&c5, seed);
+            for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+                if (c5.slots[i].type != DISTROY_WHAM) continue;
+                wham_count++;
+                double ratio = c5.slots[i].pitch.ratio; /* not yet set until first process call */
+                /* Force a process call so type_process's
+                 * pitchshift_set_semitones actually runs and updates
+                 * pitch.ratio from sub_drive. */
+                distroy_block_process(&c5.slots[i], 0.1);
+                ratio = c5.slots[i].pitch.ratio;
+                double semitone = 12.0 * log(ratio) / log(2.0);
+                if (fabs(semitone) < 0.01) {
+                    printf("WHAM landed on 0 semitones! sub_drive=%.4f\n", c5.slots[i].sub_drive);
+                    zero_found = 1;
+                }
+                if (fabs(semitone - 12.0) < 0.01) plus12++;
+                else if (fabs(semitone + 12.0) < 0.01) minus12++;
+                else other++;
+            }
+        }
+        printf("WHAM occurrences: %d, +12: %d, -12: %d, other: %d\n", wham_count, plus12, minus12, other);
+        printf("WHAM never-zero check: %s\n", zero_found ? "FAILED" : "PASSED");
+        if (zero_found) all_ok = 0;
+    }
+
+    printf("\n=== LOFI constraint check (bits 1-15, rate 100-10000Hz, 2000 seeds) ===\n");
+    {
+        int violation = 0;
+        for (unsigned int seed = 1; seed <= 2000; seed++) {
+            DistroyChain c6;
+            distroy_chain_init(&c6, 44100.0);
+            distroy_chain_randomize_all(&c6, seed);
+            for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+                if (c6.slots[i].type != DISTROY_LOFI) continue;
+                int bits = 1 + (int)(c6.slots[i].sub_drive * 14.0);
+                double rate = 100.0 + c6.slots[i].sub_tone * 9900.0;
+                if (bits < 1 || bits > 15) {
+                    printf("LOFI bits out of range: %d (sub_drive=%.4f)\n", bits, c6.slots[i].sub_drive);
+                    violation = 1;
+                }
+                if (rate < 100.0 || rate > 10000.0) {
+                    printf("LOFI rate out of range: %.1f (sub_tone=%.4f)\n", rate, c6.slots[i].sub_tone);
+                    violation = 1;
+                }
+            }
+        }
+        printf("LOFI constraint check: %s\n", violation ? "FAILED" : "PASSED (bits always 1-15, rate always 100-10000Hz)");
+        if (violation) all_ok = 0;
+    }
 
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");
     return all_ok ? 0 : 1;

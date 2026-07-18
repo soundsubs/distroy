@@ -1,9 +1,10 @@
 # DISTROY
 
-An 8-slot chain of modeled distortion/overdrive pedals for Ableton Move,
-built as a Schwung `audio_fx` module. On load, all 8 slots are randomly
-assigned a pedal from the roster; signal flows **right to left** across
-the 8 knobs (knob 8 processes first, knob 1 processes last).
+An 8-slot chain of modeled distortion pedals, filters, and other effects
+for Ableton Move, built as a Schwung `audio_fx` module. On load, all 8
+slots are randomly assigned a pedal from the roster (21 types as of
+v0.5.0); signal flows **right to left** across the 8 knobs (knob 8
+processes first, knob 1 processes last).
 
 ## Pedal roster
 
@@ -19,14 +20,44 @@ the 8 knobs (knob 8 processes first, knob 1 processes last).
 | Geiger Counter | Wet/Dry | Aggressive asymmetric clip + quantization grit |
 | Moog Ladder | Cutoff | 4-pole (24dB/oct) resonant lowpass, self-saturating, with Drive |
 | Korg MS-20 | Cutoff | Resonant HPF -> resonant LPF in series, each self-saturating |
+| Mu-Tron | Sens | Envelope-following auto-wah, smooth/rounded (wide Q) |
+| Cry Baby 535Q | Sens | Envelope-following auto-wah, narrow/vocal (high Q, snappier) |
+| Jensen | Wet/Dry | Transformer saturation, bright/extended top end |
+| Lundahl | Wet/Dry | Transformer saturation, darker/more colored low-mid |
+| LoFi | Wet/Dry | Random bit-depth (1-15) + sample-rate (100-10000Hz) crush |
+| Boss FZ-1W | Wet/Dry | Tighter, more symmetric silicon fuzz than vintage Fuzz |
+| Clip | Wet/Dry | Bare hard clipper, no coloration |
+| Rekt | Wet/Dry | Hard clip + full-wave rectify -- harsh, pitched-up buzz |
+| Wham | Wet/Dry | Pitch shifter, weighted toward +-12 semitones, never 0 |
+| Tape | Wet/Dry | Tape saturation + subtle hiss + HF rolloff |
+| Speaker | Cutoff | Speaker cabinet size emulation (small/bright <-> large/full) |
 
-**All 8 distortion-type pedals now use Wet/Dry (v0.4.3)** — previously
-Fuzz, Metal, and Big Muff used Gain instead. Every knob now defaults to
-50% and uniformly means "how much of the effect is blended in," rather
-than mixing Gain-mode and Wet/Dry-mode pedals with different knob
-semantics. The two filter types (Moog Ladder, Korg MS-20) keep Cutoff,
-since Wet/Dry isn't a meaningful concept for a filter's frequency
-control.
+**All distortion-type pedals use Wet/Dry (v0.4.3+)** — every knob
+defaults to 50% and uniformly means "how much of the effect is blended
+in." Filters (Moog Ladder, Korg MS-20, Speaker) use Cutoff since Wet/Dry
+isn't meaningful for a frequency sweep. Auto-wah types (Mu-Tron, Cry
+Baby) use Sens (envelope sensitivity/depth) since there's no expression
+pedal input to model a manually-swept wah.
+
+**On the new additions (v0.5.0):**
+- **Auto-wah (Mu-Tron, Cry Baby):** real hardware is normally swept by
+  an expression pedal; without one, these model the classic
+  envelope-follower "auto-wah" behavior instead — the filter sweeps in
+  response to input signal level, not a foot pedal.
+- **LoFi:** bit depth and sample rate are randomized (not knob-controlled)
+  per the spec, verified to never land on 16-bit or 44100Hz across 2000
+  randomized chains.
+- **Wham:** transposition amount is randomized (not knob-controlled),
+  weighted toward +-12 semitones (~70% combined) with other
+  characterful intervals filling the remaining ~30%, verified to never
+  land on 0 semitones across 2000 randomized chains. Uses a time-domain
+  granular pitch-shifting technique (dual-tap crossfade delay line), not
+  FFT-based — some grain artifacts are expected, not unlike a real
+  Whammy pedal's own character.
+- **Speaker:** models the frequency-response coloration of speaker size
+  (highpass/lowpass corner + resonant cone-frequency bump, all
+  size-linked to the Cutoff knob) rather than a full impulse-response
+  cabinet simulation.
 
 **Why the filters were added:** a chain of 8 distortion stages tends to
 compound gain fast enough that everything collapses into a clipped

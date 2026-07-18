@@ -26,6 +26,17 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_GEIGER_COUNTER] = { "Geiger Counter", "GEIGER", DISTROY_KNOB_WET_DRY },
     [DISTROY_MOOG_LADDER]  = { "Moog Ladder",   "MOOG",   DISTROY_KNOB_CUTOFF },
     [DISTROY_KORG_MS20]    = { "Korg MS-20",    "MS20",   DISTROY_KNOB_CUTOFF },
+    [DISTROY_MUTRON]       = { "Mu-Tron",       "MUTRON", DISTROY_KNOB_SENS },
+    [DISTROY_CRYBABY]      = { "Cry Baby 535Q", "CRYB",   DISTROY_KNOB_SENS },
+    [DISTROY_JENSEN]       = { "Jensen",        "JENSEN", DISTROY_KNOB_WET_DRY },
+    [DISTROY_LUNDAHL]      = { "Lundahl",       "LUND",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_LOFI]         = { "LoFi",          "LOFI",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_FZ1W]         = { "Boss FZ-1W",    "FZ1W",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_CLIP]         = { "Clip",          "CLIP",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_REKT]         = { "Rekt",          "REKT",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_WHAM]         = { "Wham",          "WHAM",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_TAPE]         = { "Tape",          "TAPE",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_SPKR]         = { "Speaker",       "SPKR",   DISTROY_KNOB_CUTOFF },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
@@ -37,6 +48,7 @@ const char* distroy_knob_mode_label(DistroyKnobMode mode) {
     switch (mode) {
         case DISTROY_KNOB_GAIN: return "GAIN";
         case DISTROY_KNOB_CUTOFF: return "CUTOFF";
+        case DISTROY_KNOB_SENS: return "SENS";
         default: return "MIX";
     }
 }
@@ -97,6 +109,25 @@ double biquad_process(Biquad *f, double x) {
     f->y2 = f->y1;
     f->y1 = y;
     return y;
+}
+
+void biquad_set_bandpass(Biquad *f, double freq_hz, double q, double sample_rate) {
+    double w0 = 2.0 * M_PI * freq_hz / sample_rate;
+    double alpha = sin(w0) / (2.0 * q);
+    double cosw0 = cos(w0);
+
+    double b0 = alpha;
+    double b1 = 0.0;
+    double b2 = -alpha;
+    double a0 = 1.0 + alpha;
+    double a1 = -2.0 * cosw0;
+    double a2 = 1.0 - alpha;
+
+    f->b0 = b0 / a0;
+    f->b1 = b1 / a0;
+    f->b2 = b2 / a0;
+    f->a1 = a1 / a0;
+    f->a2 = a2 / a0;
 }
 
 void tilteq_init(TiltEQ *t, double center_hz, double sample_rate) {
@@ -239,6 +270,123 @@ double korg35hp_process(Korg35HP *f, double x) {
 }
 
 /* ---------------------------------------------------------------------
+ * Envelope follower (auto-wah)
+ * ------------------------------------------------------------------- */
+
+void envfollow_init(EnvelopeFollower *e, double attack_ms, double release_ms, double sample_rate) {
+    e->envelope = 0.0;
+    e->attack_coeff = exp(-1.0 / (0.001 * attack_ms * sample_rate));
+    e->release_coeff = exp(-1.0 / (0.001 * release_ms * sample_rate));
+}
+
+double envfollow_process(EnvelopeFollower *e, double x) {
+    double rectified = fabs(x);
+    double coeff = (rectified > e->envelope) ? e->attack_coeff : e->release_coeff;
+    e->envelope = coeff * e->envelope + (1.0 - coeff) * rectified;
+    return e->envelope;
+}
+
+/* ---------------------------------------------------------------------
+ * Pitch shifter (WHAM) -- see header comment for the algorithm summary.
+ * ------------------------------------------------------------------- */
+
+void pitchshift_init(PitchShifter *ps) {
+    for (int i = 0; i < PITCHSHIFT_BUFFER_SIZE; i++) ps->buffer[i] = 0.0;
+    ps->write_pos = 0;
+    ps->read_offset1 = 0.0;
+    ps->read_offset2 = PITCHSHIFT_WINDOW * 0.5; /* permanently half a window apart */
+    ps->ratio = 1.0;
+}
+
+void pitchshift_set_semitones(PitchShifter *ps, double semitones) {
+    ps->ratio = pow(2.0, semitones / 12.0);
+}
+
+static double pitchshift_read_interp(PitchShifter *ps, double pos) {
+    double floor_pos = floor(pos);
+    int i0 = (int)floor_pos;
+    double frac = pos - floor_pos;
+    int idx0 = ((i0 % PITCHSHIFT_BUFFER_SIZE) + PITCHSHIFT_BUFFER_SIZE) % PITCHSHIFT_BUFFER_SIZE;
+    int idx1 = (idx0 + 1) % PITCHSHIFT_BUFFER_SIZE;
+    return ps->buffer[idx0] * (1.0 - frac) + ps->buffer[idx1] * frac;
+}
+
+double pitchshift_process(PitchShifter *ps, double x) {
+    ps->buffer[ps->write_pos] = x;
+
+    /* Advance both taps relative to the write head by (1 - ratio) per
+     * sample -- ratio>1 (pitch up) makes the read heads fall behind
+     * more slowly (read faster through history); ratio<1 (pitch down)
+     * makes them fall behind faster (read slower through history). */
+    ps->read_offset1 += (1.0 - ps->ratio);
+    ps->read_offset2 += (1.0 - ps->ratio);
+
+    if (ps->read_offset1 < 0.0) ps->read_offset1 += PITCHSHIFT_WINDOW;
+    if (ps->read_offset1 >= PITCHSHIFT_WINDOW) ps->read_offset1 -= PITCHSHIFT_WINDOW;
+    if (ps->read_offset2 < 0.0) ps->read_offset2 += PITCHSHIFT_WINDOW;
+    if (ps->read_offset2 >= PITCHSHIFT_WINDOW) ps->read_offset2 -= PITCHSHIFT_WINDOW;
+
+    double pos1 = (double)ps->write_pos - ps->read_offset1;
+    double pos2 = (double)ps->write_pos - ps->read_offset2;
+
+    double s1 = pitchshift_read_interp(ps, pos1);
+    double s2 = pitchshift_read_interp(ps, pos2);
+
+    /* Triangular crossfade: each tap's gain peaks at the center of its
+     * window and fades to 0 at the edges, where the OTHER tap is at
+     * its own peak -- classic complementary 2-tap granular crossfade. */
+    double w1 = 1.0 - fabs((ps->read_offset1 / PITCHSHIFT_WINDOW) * 2.0 - 1.0);
+    double w2 = 1.0 - fabs((ps->read_offset2 / PITCHSHIFT_WINDOW) * 2.0 - 1.0);
+
+    double out = s1 * w1 + s2 * w2;
+
+    ps->write_pos = (ps->write_pos + 1) % PITCHSHIFT_BUFFER_SIZE;
+    return out;
+}
+
+/* ---------------------------------------------------------------------
+ * Decimator + bit quantizer (LOFI)
+ * ------------------------------------------------------------------- */
+
+void decimator_init(SimpleDecimator *d) {
+    d->held_value = 0.0;
+    d->phase = 0.0;
+}
+
+double decimator_process(SimpleDecimator *d, double x, double target_hz, double host_sample_rate) {
+    d->phase += target_hz / host_sample_rate;
+    if (d->phase >= 1.0) {
+        d->phase -= 1.0;
+        d->held_value = x;
+    }
+    return d->held_value;
+}
+
+double quantize_bits(double x, int bits) {
+    if (bits >= 16) return x; /* not reachable given LOFI caps at 15, safety net */
+    double levels = pow(2.0, (double)bits - 1); /* signed range, symmetric around 0 */
+    if (levels < 1.0) levels = 1.0;
+    return round(x * levels) / levels;
+}
+
+/* ---------------------------------------------------------------------
+ * Noise generator (TAPE hiss)
+ * ------------------------------------------------------------------- */
+
+void noise_init(SimpleNoise *n, unsigned int seed) {
+    n->state = seed != 0 ? seed : 1;
+}
+
+double noise_next(SimpleNoise *n) {
+    unsigned int s = n->state;
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    n->state = s;
+    return ((double)s / (double)UINT32_MAX) * 2.0 - 1.0;
+}
+
+/* ---------------------------------------------------------------------
  * Waveshaping primitives
  * ------------------------------------------------------------------- */
 
@@ -284,6 +432,21 @@ static double quantize(double x, double levels) {
     return round(x * levels) / levels;
 }
 
+/* Maps a 0.0-1.0 random value to a WHAM pitch-shift amount in
+ * semitones, weighted per the project spec: never 0, mostly +-12
+ * (70% combined), sometimes another characterful interval (30%,
+ * spread across octave/4th/5th/2nd shifts up and down). */
+static double decode_wham_semitone(double u) {
+    if (u < 0.35) return 12.0;
+    if (u < 0.70) return -12.0;
+    static const double others[] = { -24.0, -7.0, -5.0, -2.0, 2.0, 5.0, 7.0, 24.0 };
+    double remainder = (u - 0.70) / 0.30;
+    int idx = (int)(remainder * 8.0);
+    if (idx > 7) idx = 7;
+    if (idx < 0) idx = 0;
+    return others[idx];
+}
+
 /* ---------------------------------------------------------------------
  * Block (single pedal slot)
  * ------------------------------------------------------------------- */
@@ -300,6 +463,11 @@ void distroy_block_init(DistroyBlock *b, DistroyType type, double sample_rate) {
     b->color_hs = (OnePole){0};
     b->color_peak = (Biquad){0};
     b->tone_stage = (TiltEQ){0};
+    b->env = (EnvelopeFollower){0};
+    b->wah_filter = (Biquad){0};
+    pitchshift_init(&b->pitch);
+    decimator_init(&b->decim);
+    noise_init(&b->noise, (unsigned int)(uintptr_t)b ^ 0x9e3779b9u);
     distroy_block_set_type(b, type);
 }
 
@@ -316,6 +484,15 @@ static double tilt_center_hz(DistroyType type) {
         case DISTROY_SANSAMP:      return 1000.0;
         case DISTROY_RAT:          return 1500.0;
         case DISTROY_GEIGER_COUNTER: return 900.0;
+        case DISTROY_MUTRON:       return 1000.0;
+        case DISTROY_CRYBABY:      return 1000.0;
+        case DISTROY_JENSEN:       return 1500.0;
+        case DISTROY_LUNDAHL:      return 1000.0;
+        case DISTROY_FZ1W:         return 1000.0;
+        case DISTROY_CLIP:         return 1000.0;
+        case DISTROY_REKT:         return 900.0;
+        case DISTROY_WHAM:         return 1000.0;
+        case DISTROY_TAPE:         return 1500.0;
         default:                   return 1000.0;
     }
 }
@@ -358,6 +535,28 @@ void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
         case DISTROY_KORG_MS20:
             korg35hp_init(&b->korg_hp, sr);
             korg35lp_init(&b->korg_lp, sr);
+            break;
+        case DISTROY_MUTRON:
+            /* smoother/rounder auto-wah -- wider Q */
+            envfollow_init(&b->env, 6.0, 120.0, sr);
+            break;
+        case DISTROY_CRYBABY:
+            /* narrower/more vocal auto-wah -- higher Q, snappier envelope */
+            envfollow_init(&b->env, 3.0, 90.0, sr);
+            break;
+        case DISTROY_JENSEN:
+            onepole_set_lowpass(&b->color_lp, 12000.0, sr); /* bright, extended top */
+            biquad_set_peaking(&b->color_peak, 80.0, 0.9, 2.0, sr); /* clean low-end lift */
+            break;
+        case DISTROY_LUNDAHL:
+            onepole_set_lowpass(&b->color_lp, 8000.0, sr); /* darker top */
+            biquad_set_peaking(&b->color_peak, 120.0, 0.9, 3.0, sr); /* more colored low-mid */
+            break;
+        case DISTROY_TAPE:
+            onepole_set_lowpass(&b->color_lp, 9000.0, sr); /* tape HF softening */
+            break;
+        case DISTROY_FZ1W:
+            biquad_set_peaking(&b->color_peak, 1000.0, 1.0, 2.0, sr); /* tighter presence than vintage Fuzz */
             break;
         default:
             break;
@@ -441,6 +640,91 @@ static double type_process(DistroyBlock *b, double x, double drive) {
             y = korg35lp_process(&b->korg_lp, y);
             return y;
         }
+        case DISTROY_MUTRON: {
+            /* SENS-mode: "drive" here is the knob value = envelope
+             * sensitivity/depth. Smoother/rounder sweep than Cry Baby
+             * (wider Q, wider but gentler frequency range). */
+            double env = envfollow_process(&b->env, x);
+            double sens = drive;
+            double freq = 300.0 + clampd(env * sens * 6.0, 0.0, 1.0) * 1500.0;
+            biquad_set_bandpass(&b->wah_filter, freq, 3.0, b->sample_rate);
+            return biquad_process(&b->wah_filter, x);
+        }
+        case DISTROY_CRYBABY: {
+            /* Narrower Q, snappier envelope, more vocal/aggressive sweep
+             * than Mu-Tron. */
+            double env = envfollow_process(&b->env, x);
+            double sens = drive;
+            double freq = 400.0 + clampd(env * sens * 6.0, 0.0, 1.0) * 1800.0;
+            biquad_set_bandpass(&b->wah_filter, freq, 5.0, b->sample_rate);
+            return biquad_process(&b->wah_filter, x);
+        }
+        case DISTROY_JENSEN: {
+            double gain = 1.5 + drive * 3.5;
+            double y = asym_soft_clip(gain * x, 3.0, 2.7); /* gentle, fairly symmetric */
+            y = onepole_process(&b->color_lp, y); /* bright/extended top */
+            return biquad_process(&b->color_peak, y); /* clean low-end lift */
+        }
+        case DISTROY_LUNDAHL: {
+            double gain = 1.5 + drive * 3.0;
+            double y = asym_soft_clip(gain * x, 2.5, 3.3); /* more asymmetric/colored */
+            y = onepole_process(&b->color_lp, y); /* darker top */
+            return biquad_process(&b->color_peak, y); /* more colored low-mid */
+        }
+        case DISTROY_LOFI: {
+            /* sub_drive/sub_tone repurposed as bit-depth/sample-rate
+             * encodes (see header comment) rather than Drive/Tone. */
+            int bits = 1 + (int)(b->sub_drive * 14.0); /* 1-15, never 16 */
+            double target_hz = 100.0 + b->sub_tone * 9900.0; /* 100-10000 Hz, never 44100 */
+            double y = decimator_process(&b->decim, x, target_hz, b->sample_rate);
+            return quantize_bits(y, bits);
+        }
+        case DISTROY_FZ1W: {
+            double gain = 4.0 + drive * 20.0;
+            double y = asym_soft_clip(gain * x, 3.5 + drive * 1.5, 3.0 + drive * 1.5); /* tighter/more symmetric than Fuzz */
+            return biquad_process(&b->color_peak, y);
+        }
+        case DISTROY_CLIP: {
+            double gain = 3.0 + drive * 40.0;
+            return hard_clip(x, gain, 1.0);
+        }
+        case DISTROY_REKT: {
+            double gain = 3.0 + drive * 40.0;
+            double y = hard_clip(x, gain, 1.0);
+            /* Full-wave rectify -- the resulting DC offset is removed by
+             * the universal dc_block downstream, leaving just the
+             * harsh, pitched-up-sounding buzz character. */
+            return fabs(y);
+        }
+        case DISTROY_WHAM: {
+            double semitone = decode_wham_semitone(b->sub_drive);
+            pitchshift_set_semitones(&b->pitch, semitone);
+            return pitchshift_process(&b->pitch, x);
+        }
+        case DISTROY_TAPE: {
+            double gain = 1.3 + drive * 1.8;
+            double y = soft_clip(x, gain);
+            y = onepole_process(&b->color_lp, y);
+            double hiss = noise_next(&b->noise) * 0.0025;
+            return y + hiss;
+        }
+        case DISTROY_SPKR: {
+            /* CUTOFF-mode: "drive" here is the knob value = speaker
+             * size, 0=small/bright, 1=large/full. Reuses color_hs/
+             * color_lp/color_peak (already-existing generic fields) as
+             * the HPF/LPF/resonance-bump stages, no new struct fields
+             * needed. */
+            double size = drive;
+            double hp_cutoff = 300.0 - size * 220.0;
+            double lp_cutoff = 6000.0 - size * 2500.0;
+            double peak_freq = 150.0 - size * 80.0;
+            onepole_set_highpass(&b->color_hs, hp_cutoff, b->sample_rate);
+            onepole_set_lowpass(&b->color_lp, lp_cutoff, b->sample_rate);
+            biquad_set_peaking(&b->color_peak, peak_freq, 1.5, 4.0, b->sample_rate);
+            double y = onepole_process(&b->color_hs, x);
+            y = onepole_process(&b->color_lp, y);
+            return biquad_process(&b->color_peak, y);
+        }
         default:
             return x;
     }
@@ -449,21 +733,25 @@ static double type_process(DistroyBlock *b, double x, double drive) {
 double distroy_block_process(DistroyBlock *b, double x) {
     const DistroyTypeInfo *info = distroy_type_info(b->type);
     double wet, out;
-    int is_filter_type = (info->knob_mode == DISTROY_KNOB_CUTOFF);
+    /* These types repurpose sub_tone for something other than TiltEQ
+     * tone (Moog/Korg: Resonance, LOFI: sample-rate encode) -- keep
+     * the tone stage neutral/flat for them so it doesn't double up.
+     * NOTE: this is NOT simply "all CUTOFF-mode types" -- SPKR is also
+     * CUTOFF mode but keeps normal Tone/TiltEQ, since its sub_tone
+     * still means Tone for that type. */
+    int skip_tilt = (b->type == DISTROY_MOOG_LADDER || b->type == DISTROY_KORG_MS20
+                      || b->type == DISTROY_LOFI);
 
-    /* Filter types (Moog/Korg) repurpose sub_tone as Resonance, not
-     * TiltEQ tone -- keep the tone stage neutral/flat for them so it
-     * doesn't double up with the filter's own resonance character. */
-    b->tone_stage.tone = is_filter_type ? 0.5 : b->sub_tone;
+    b->tone_stage.tone = skip_tilt ? 0.5 : b->sub_tone;
 
     if (info->knob_mode == DISTROY_KNOB_WET_DRY) {
         wet = type_process(b, x, b->sub_drive);
         out = x * (1.0 - b->knob) + wet * b->knob;
     } else {
-        /* GAIN and CUTOFF modes both pass the knob straight through and
-         * are fully wet (no dry blend) -- see type_process for how
-         * CUTOFF-mode types (Moog/Korg) interpret this argument as
-         * cutoff frequency rather than drive/gain. */
+        /* GAIN, CUTOFF, and SENS modes all pass the knob straight
+         * through and are fully wet (no dry blend) -- see type_process
+         * for how each mode interprets this argument (drive, cutoff
+         * frequency, or envelope sensitivity respectively). */
         wet = type_process(b, x, b->knob);
         out = wet;
     }
