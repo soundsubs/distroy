@@ -715,6 +715,43 @@ double powerstarve_process(PowerStarve *ps, double x, double sample_rate) {
 }
 
 /* ---------------------------------------------------------------------
+ * Noise gate (stereo-linked, slow-release) -- see header comment.
+ * ------------------------------------------------------------------- */
+
+void noisegate_init(NoiseGate *gate, double threshold_db, double sample_rate) {
+    gate->envelope = 0.0;
+    gate->gain = 1.0; /* start open -- don't mute the very first block */
+    gate->thresholdLinear = pow(10.0, threshold_db / 20.0);
+    /* Envelope follower on the input: fast attack so real transients are
+     * detected immediately, moderate release so brief dips between
+     * notes don't cause chattering. */
+    gate->envAttackCoeff = exp(-1.0 / (0.001 * 2.0 * sample_rate));
+    gate->envReleaseCoeff = exp(-1.0 / (0.001 * 50.0 * sample_rate));
+    /* Gate's own gain smoothing: fast-ish attack (re-opening) so
+     * legitimate playing isn't perceptibly clipped when it resumes;
+     * SLOW release (closing) -- "ramps down slowly to silence" per
+     * spec, a graceful fade rather than an abrupt cutoff that would
+     * sound like a glitch. */
+    gate->gateAttackCoeff = exp(-1.0 / (0.001 * 10.0 * sample_rate));
+    gate->gateReleaseCoeff = exp(-1.0 / (0.001 * 500.0 * sample_rate));
+}
+
+void noisegate_process(NoiseGate *gate, double inputL, double inputR, double *outputL, double *outputR) {
+    double rectified = fabs(inputL);
+    if (fabs(inputR) > rectified) rectified = fabs(inputR);
+
+    double envCoeff = (rectified > gate->envelope) ? gate->envAttackCoeff : gate->envReleaseCoeff;
+    gate->envelope = envCoeff * gate->envelope + (1.0 - envCoeff) * rectified;
+
+    double targetGain = (gate->envelope > gate->thresholdLinear) ? 1.0 : 0.0;
+    double gainCoeff = (targetGain > gate->gain) ? gate->gateAttackCoeff : gate->gateReleaseCoeff;
+    gate->gain = gainCoeff * gate->gain + (1.0 - gainCoeff) * targetGain;
+
+    *outputL *= gate->gain;
+    *outputR *= gate->gain;
+}
+
+/* ---------------------------------------------------------------------
  * Waveshaping primitives
  * ------------------------------------------------------------------- */
 
@@ -796,6 +833,7 @@ void distroy_block_init(DistroyBlock *b, DistroyType type, double sample_rate) {
     pitchshift_init(&b->pitch);
     decimator_init(&b->decim);
     noise_init(&b->noise, (unsigned int)(uintptr_t)b ^ 0x9e3779b9u);
+    b->battery_amount = 0.0;
     distroy_block_set_type(b, type);
 }
 
@@ -833,6 +871,24 @@ void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
 
     tilteq_init(&b->tone_stage, tilt_center_hz(type), sr);
     b->tone_stage.tone = b->sub_tone;
+
+    /* Battery-starve per-module malfunction personality (VST3-only
+     * feature) -- each block gets its own randomized "which way it
+     * fails" category, seeded from its address + type so different
+     * slots (and the same slot landing on different types) get varied
+     * personalities. NOTE: this seed is deterministic per (address,
+     * type) pair, not re-randomized on every chain randomize call the
+     * way sub_drive/tone/level are -- a known simplification (the
+     * malfunction_rng state still generates fresh unpredictable
+     * per-sample timing/amounts regardless, so the actual chaos still
+     * varies; only the CATEGORY -- cutout vs crackle vs wobble vs
+     * extra distortion -- is fixed per address+type). */
+    unsigned int malfSeed = (unsigned int)(uintptr_t)b ^ ((unsigned int)type * 0x2545f491u) ^ 0x7f4a7c15u;
+    malfSeed ^= malfSeed << 13; malfSeed ^= malfSeed >> 17; malfSeed ^= malfSeed << 5;
+    b->malfunction_type = malfSeed % 4;
+    b->malfunction_rng = malfSeed | 1u; /* ensure nonzero */
+    b->malfunction_cutout_remaining = 0;
+    b->malfunction_wobble_phase = 0.0;
 
     switch (type) {
         case DISTROY_BOSS_OD:
@@ -1178,6 +1234,72 @@ static double type_process(DistroyBlock *b, double x, double drive) {
     }
 }
 
+/* Battery-starve per-module chaos (VST3-only feature, see the
+ * DistroyBlock/DistroyChain struct comments) -- applied at the very end
+ * of distroy_block_process(), after everything else, so it colors
+ * whatever that pedal's normal output would have been. Inert whenever
+ * battery_amount is 0 (the default, and always the case on Move). Each
+ * block's malfunction_type (randomized once in distroy_block_set_type)
+ * picks ONE of four failure characters, so different pedals in the same
+ * chain misbehave differently rather than one uniform global effect --
+ * that's layered separately via PowerStarve in the wrapper. */
+static double apply_battery_malfunction(DistroyBlock *b, double out) {
+    double a = b->battery_amount;
+    if (a <= 0.001) return out;
+
+    unsigned int *rng = &b->malfunction_rng;
+
+    switch (b->malfunction_type) {
+        case 0: {
+            /* Intermittent cutout -- like a loose connection dropping
+             * out entirely for brief moments. Never fully silent during
+             * a cutout (same "never truly 0" pattern used elsewhere in
+             * this project for safety-adjacent glitch effects). */
+            if (b->malfunction_cutout_remaining > 0) {
+                b->malfunction_cutout_remaining--;
+                return out * 0.05;
+            }
+            *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
+            double chance = a * 0.00015; /* scales with how dead the battery is */
+            if ((double)(*rng % 1000000) / 1000000.0 < chance) {
+                *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
+                double durSec = 0.01 + a * 0.06 + (double)(*rng % 1000) / 1000.0 * 0.04;
+                b->malfunction_cutout_remaining = (int)(b->sample_rate * durSec);
+            }
+            return out;
+        }
+        case 1: {
+            /* Crackle burst -- like a failing solder joint or dying
+             * capacitor spitting noise. */
+            *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
+            double chance = a * 0.0004;
+            if ((double)(*rng % 1000000) / 1000000.0 < chance) {
+                *rng ^= *rng << 13; *rng ^= *rng >> 17; *rng ^= *rng << 5;
+                double burst = ((double)(*rng % 2000000) / 1000000.0 - 1.0) * a * 0.7;
+                out += burst;
+            }
+            return out;
+        }
+        case 2: {
+            /* Wobble -- an unstable operating point, amplitude
+             * fluttering irregularly rather than the smooth global
+             * wobble PowerStarve already applies. */
+            b->malfunction_wobble_phase += 2.0 * M_PI * (4.0 + a * 20.0) / b->sample_rate;
+            if (b->malfunction_wobble_phase > 2.0 * M_PI) b->malfunction_wobble_phase -= 2.0 * M_PI;
+            return out * (1.0 + sin(b->malfunction_wobble_phase) * a * 0.2);
+        }
+        case 3:
+        default: {
+            /* Extra distortion -- collapsing headroom makes an already-
+             * driven circuit clip harder and get fartier as voltage
+             * sags. */
+            double driveAmt = 1.0 + a * 3.5;
+            double norm = tanh(driveAmt);
+            return (norm > 1e-9) ? (tanh(out * driveAmt) / norm) : out;
+        }
+    }
+}
+
 double distroy_block_process(DistroyBlock *b, double x) {
     const DistroyTypeInfo *info = distroy_type_info(b->type);
     double wet, out;
@@ -1234,7 +1356,9 @@ double distroy_block_process(DistroyBlock *b, double x) {
      * tasteful range so it colors output level without wrecking gain
      * staging through the rest of the chain. */
     double level_gain = 0.7 + b->sub_level * 0.6;
-    return out * level_gain;
+    out = out * level_gain;
+
+    return apply_battery_malfunction(b, out);
 }
 
 double distroy_block_get_envelope_level(const DistroyBlock *b) {
@@ -1248,6 +1372,7 @@ double distroy_block_get_envelope_level(const DistroyBlock *b) {
 void distroy_chain_init(DistroyChain *c, double sample_rate) {
     c->sample_rate = sample_rate;
     c->reverse = 0; /* default: left to right (slot 0 first) */
+    c->battery_amount = 0.0;
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
         distroy_block_init(&c->slots[i], DISTROY_BOSS_OD, sample_rate);
     }
@@ -1315,10 +1440,10 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
              * deliberately; randomization just leaves it off. */
             tone_rand = 0.0;
         } else if (t == DISTROY_POLIVOKS) {
-            /* Capped at 40% max -- even Polivoks' intentionally growly
-             * resonance was howling/resonating too much above that,
-             * per direct feedback. */
-            tone_rand *= 0.4;
+            /* Capped at 20% max -- 40% (v0.9.0) still howled/resonated
+             * into a near-constant tone, per direct feedback. Lowered
+             * further. */
+            tone_rand *= 0.2;
         } else if (t == DISTROY_SEM) {
             /* Always randomizes to 50-100% -- this is the resonance
              * CEILING used at knob=0 (see type_process: knob sweeps
@@ -1336,6 +1461,15 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
 }
 
 double distroy_chain_process(DistroyChain *c, double x) {
+    /* Sync the chain-level battery amount into each slot -- cheap to do
+     * every sample (a single double assignment x8), keeps this simple
+     * rather than needing a separate "did it change" dirty-check. Move
+     * never sets c->battery_amount away from 0, so this is always inert
+     * there. */
+    for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+        c->slots[i].battery_amount = c->battery_amount;
+    }
+
     double y = x;
     if (c->reverse) {
         /* Right to left: slot 7 processes first, slot 0 last. */

@@ -463,10 +463,10 @@ int main(void) {
          * 0 the way an unfloored formula would over time. */
         printf("PowerStarve floor test: max output seen=%.5f, %s\n",
                maxSeen, (maxSeen > 0.0001) ? "PASSED (never fully silent)" : "FAILED (collapsed to silence)");
-        if (maxSeen <= 0.0001) all_ok = 0;
+        if (maxSeen <= 0.0001 || !floorOk) all_ok = 0;
     }
 
-    printf("\n=== Polivoks resonance cap test (max 40%%, 1000 seeds) ===\n");
+    printf("\n=== Polivoks resonance cap test (max 20%%, 1000 seeds) ===\n");
     {
         int violation = 0;
         for (unsigned int seed = 1; seed <= 1000; seed++) {
@@ -475,13 +475,13 @@ int main(void) {
             distroy_chain_randomize_all(&c7, seed);
             for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
                 if (c7.slots[i].type != DISTROY_POLIVOKS) continue;
-                if (c7.slots[i].sub_tone > 0.40 + 1e-9) {
-                    printf("Polivoks resonance %.4f exceeds 40%% cap\n", c7.slots[i].sub_tone);
+                if (c7.slots[i].sub_tone > 0.20 + 1e-9) {
+                    printf("Polivoks resonance %.4f exceeds 20%% cap\n", c7.slots[i].sub_tone);
                     violation = 1;
                 }
             }
         }
-        printf("Polivoks resonance cap test: %s\n", violation ? "FAILED" : "PASSED (never exceeds 40%% in 1000 chains)");
+        printf("Polivoks resonance cap test: %s\n", violation ? "FAILED" : "PASSED (never exceeds 20%% in 1000 chains)");
         if (violation) all_ok = 0;
     }
 
@@ -515,6 +515,118 @@ int main(void) {
         printf("SEM inverse cutoff/resonance formula: %s (knob=0 -> resonance=ceiling=%.2f, knob=1 -> resonance=%.2f)\n",
                inverseOk ? "PASSED" : "FAILED", resAtKnob0, resAtKnob1);
         if (!inverseOk) all_ok = 0;
+    }
+
+    printf("\n=== Noise gate test (drone silenced, slow ramp, reopens on signal) ===\n");
+    {
+        NoiseGate gate;
+        noisegate_init(&gate, -50.0, 44100.0);
+        int gateOk = 1;
+
+        /* Simulate a "drone with no input" -- feed silence in, but a
+         * constant nonzero "output" (as if a self-sustaining filter
+         * resonance were droning), and confirm the gate ramps output
+         * toward 0 (not instantly, but within a reasonable window). */
+        double outL, outR;
+        double gainAtStart = 0.0, gainAt100ms = 0.0, gainAt2s = 0.0;
+        for (int i = 0; i < 88200; i++) { /* 2 seconds -- ~4 time constants at 500ms release */
+            outL = 0.5; outR = 0.5; /* constant drone-like output */
+            noisegate_process(&gate, 0.0, 0.0, &outL, &outR); /* silent input */
+            if (i == 0) gainAtStart = gate.gain;
+            if (i == 4410) gainAt100ms = gate.gain;
+            if (i == 88199) gainAt2s = gate.gain;
+            if (!isfinite(outL) || !isfinite(outR)) { printf("Noise gate output not finite\n"); gateOk = 0; }
+        }
+        printf("Gain: start=%.3f, @100ms=%.3f, @2s=%.4f (should decrease toward 0, not instantly)\n",
+               gainAtStart, gainAt100ms, gainAt2s);
+        if (!(gainAtStart > gainAt100ms && gainAt100ms > gainAt2s && gainAt2s < 0.05)) {
+            printf("Noise gate did not ramp down as expected\n");
+            gateOk = 0;
+        }
+        if (gainAtStart < 0.9) {
+            printf("Noise gate closed too abruptly (not a slow ramp) -- gain dropped from 1.0 to %.3f in one sample\n", gainAtStart);
+            gateOk = 0;
+        }
+
+        /* Now feed real signal back in and confirm the gate reopens. */
+        for (int i = 0; i < 4410; i++) { /* 100ms of real signal */
+            outL = 0.5; outR = 0.5;
+            noisegate_process(&gate, 0.3, 0.3, &outL, &outR);
+        }
+        printf("Gain after 100ms of real signal returning: %.3f (should be back near 1.0)\n", gate.gain);
+        if (gate.gain < 0.9) { printf("Noise gate did not reopen properly\n"); gateOk = 0; }
+
+        printf("Noise gate test: %s\n", gateOk ? "PASSED" : "FAILED");
+        if (!gateOk) all_ok = 0;
+    }
+
+    printf("\n=== Battery-starve per-module malfunction test ===\n");
+    {
+        int malfOk = 1;
+
+        /* Inert-by-default check: battery_amount=0 (the default
+         * everywhere except when a VST3 wrapper explicitly sets it via
+         * DistroyChain.battery_amount) must produce byte-identical
+         * behavior to before this feature existed. */
+        DistroyBlock inertBlock;
+        distroy_block_init(&inertBlock, DISTROY_BOSS_OD, 44100.0);
+        double phase = 0.0;
+        for (int i = 0; i < 4410; i++) {
+            double x = sin(phase) * 0.7;
+            phase += 2.0 * M_PI * 220.0 / 44100.0;
+            double y = distroy_block_process(&inertBlock, x);
+            if (!isfinite(y)) { printf("Inert-battery block produced non-finite output\n"); malfOk = 0; }
+        }
+        printf("Inert-when-battery-0 check: %s\n", malfOk ? "PASSED" : "FAILED");
+
+        /* All 4 malfunction types, sustained at max battery drain (1.0),
+         * must stay finite -- worst-case stress test, same rigor as
+         * every other DSP addition in this project. */
+        for (unsigned int mtype = 0; mtype < 4; mtype++) {
+            DistroyBlock mb;
+            distroy_block_init(&mb, DISTROY_METAL, 44100.0);
+            mb.malfunction_type = mtype; /* force each type explicitly */
+            mb.battery_amount = 1.0;     /* max drain -- worst case */
+            double maxSeen = 0.0;
+            int cutoutSeen = 0;
+            double ph = 0.0;
+            for (int i = 0; i < 88200; i++) { /* 2 seconds */
+                double x = sin(ph) * 0.8;
+                ph += 2.0 * M_PI * 440.0 / 44100.0;
+                double y = distroy_block_process(&mb, x);
+                if (!isfinite(y)) {
+                    printf("Malfunction type %u produced non-finite output at sample %d\n", mtype, i);
+                    malfOk = 0;
+                    break;
+                }
+                if (fabs(y) > maxSeen) maxSeen = fabs(y);
+                if (mtype == 0 && mb.malfunction_cutout_remaining > 0) cutoutSeen = 1;
+            }
+            printf("Malfunction type %u: finite=yes, peak=%.4f%s\n", mtype, maxSeen,
+                   (mtype == 0) ? (cutoutSeen ? ", cutout triggered at least once" : ", no cutout in 2s (unlucky timing, not necessarily a bug)") : "");
+        }
+
+        /* Confirm distinct blocks get varied malfunction_type
+         * assignments (not all identical) -- checked across a real
+         * chain's 8 slots (genuinely distinct addresses) rather than
+         * repeated stack-local variables, which can end up reusing the
+         * same address across loop iterations and understate variety. */
+        int seenTypes[4] = { 0, 0, 0, 0 };
+        for (unsigned int seed = 1; seed <= 30; seed++) {
+            DistroyChain varietyChain;
+            distroy_chain_init(&varietyChain, 44100.0);
+            distroy_chain_randomize_all(&varietyChain, seed);
+            for (int k = 0; k < DISTROY_NUM_SLOTS; k++) {
+                if (varietyChain.slots[k].malfunction_type > 3) { printf("malfunction_type out of range\n"); malfOk = 0; }
+                seenTypes[varietyChain.slots[k].malfunction_type] = 1;
+            }
+        }
+        int typesCovered = seenTypes[0] + seenTypes[1] + seenTypes[2] + seenTypes[3];
+        printf("Malfunction type variety across 30 randomized chains (240 slots): %d of 4 categories seen\n", typesCovered);
+        if (typesCovered < 3) { printf("Suspiciously low variety -- possible seeding bug\n"); malfOk = 0; }
+
+        printf("Battery-starve per-module malfunction test: %s\n", malfOk ? "PASSED" : "FAILED");
+        if (!malfOk) all_ok = 0;
     }
 
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");

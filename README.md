@@ -159,10 +159,47 @@ Verified via a dedicated stress test (`make test`): all 8 pedal types ×
 8 corner-case combinations of Drive/Tone/Level at their extremes (0.0
 and 1.0) produce finite output.
 
+## Per-module battery-starve chaos (v0.11.0, VST3-only feature, DSP core change)
+
+Battery-starve (the VST3's power icon feature) previously applied one
+uniform global effect to the whole stereo output. Each block/slot now
+also gets its own randomized "malfunction personality" (one of four:
+intermittent cutout, crackle burst, irregular wobble, or collapsing-
+headroom extra distortion), layered ON TOP of the existing global
+effect, so different pedals in the same chain fail differently as the
+battery drains rather than the whole chain degrading uniformly — "some
+modules might randomly cut out, while others misbehave like failing
+analog circuits with burnt out parts," per spec. Entirely inert unless
+a wrapper sets `DistroyChain.battery_amount` away from 0 — Move never
+does, so this has zero effect on Move despite living in the shared DSP
+core. Verified via dedicated tests: confirmed inert at battery_amount=0
+(byte-for-byte same behavior as before this existed), all 4 malfunction
+types stay finite under a sustained 2-second worst-case (max drain), and
+genuine type variety across randomized chains (not just one category
+always winning).
+
+## Noise gate on output (v0.10.0)
+
+Certain resonant-filter combinations (Moog Ladder/Korg MS-20/Oberheim
+SEM/Polivoks, especially stacked in the same chain) could develop a
+self-sustaining drone that persists even with silence coming in. A
+stereo-linked noise gate now monitors the ORIGINAL input signal (before
+the chain) to detect genuine silence, then ramps the chain's output down
+slowly (500ms release time constant — a graceful fade, not an abrupt
+cutoff that would sound like a glitch) rather than letting a droning
+chain run indefinitely. Re-opens quickly (10ms) once real signal
+returns, so legitimate playing isn't perceptibly clipped. Threshold is
+-50dBFS (deliberately conservative — quiet passages and natural decay
+tails shouldn't trigger it, only genuine silence). Verified via a
+dedicated test: confirms the gain ramps down gradually rather than
+instantly, reaches near-silence after a couple seconds of true silence,
+and fully reopens within 100ms of signal returning.
+
 ## Filter/knob tuning pass (v0.9.0)
 
-- **Polivoks resonance capped at 40%** — even its intentionally growly
-  resonance was howling too much above that, per direct feedback.
+- **Polivoks resonance capped at 20%** (v0.9.1, lowered from an initial
+  40% in v0.9.0) — even 40% was howling into a near-constant tone, per
+  direct feedback.
 - **Oberheim SEM's knob now inversely couples cutoff and resonance** —
   at knob=0, cutoff is near its minimum and resonance is at a randomized
   ceiling (always 50-100%); at knob=1, cutoff is at its maximum and

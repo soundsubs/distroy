@@ -96,6 +96,8 @@ typedef struct {
                                         still produce different results */
     BrickwallLimiter limiter; /* safety limiter on the final stereo
                                   output -- see distroy_dsp.h for design */
+    NoiseGate gate; /* fixes drone-with-no-input from certain resonant
+                        filter combinations -- see distroy_dsp.h */
 } DistroyInstance;
 
 static double clampd(double x, double lo, double hi) {
@@ -129,6 +131,7 @@ static void* create_instance(const char *module_dir, const char *config_json) {
     distroy_chain_init(&inst->left, inst->sample_rate);
     distroy_chain_init(&inst->right, inst->sample_rate);
     brickwall_limiter_init(&inst->limiter, -1.0, 80.0, inst->sample_rate);
+    noisegate_init(&inst->gate, -50.0, inst->sample_rate);
 
     /* Random 8-pedal chain AND random knob values on instantiation. */
     randomize_everything(inst);
@@ -145,11 +148,20 @@ static void process_block(void *instance, int16_t *audio_inout, int frames) {
     if (!inst) return;
 
     for (int i = 0; i < frames; i++) {
-        double l = audio_inout[2 * i]     / 32768.0;
-        double r = audio_inout[2 * i + 1] / 32768.0;
+        double in_l = audio_inout[2 * i]     / 32768.0;
+        double in_r = audio_inout[2 * i + 1] / 32768.0;
 
-        l = distroy_chain_process(&inst->left, l);
-        r = distroy_chain_process(&inst->right, r);
+        double l = distroy_chain_process(&inst->left, in_l);
+        double r = distroy_chain_process(&inst->right, in_r);
+
+        /* Noise gate: fixes a real problem where certain resonant-
+         * filter combinations (Moog/Korg/SEM/Polivoks, especially
+         * stacked) can develop a self-sustaining drone that persists
+         * even with silence coming in. Monitors the ORIGINAL input
+         * (in_l/in_r, captured before the chain) to detect genuine
+         * silence, then ramps the chain's OUTPUT down slowly rather
+         * than cutting it abruptly. See distroy_dsp.h's NoiseGate. */
+        noisegate_process(&inst->gate, in_l, in_r, &l, &r);
 
         /* Brickwall safety limiter: stereo-linked, look-ahead, replaces
          * the old bare hard-clamp-to-int16-range (which worked but

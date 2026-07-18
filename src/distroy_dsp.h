@@ -384,6 +384,31 @@ void powerstarve_init(PowerStarve *ps, unsigned int seed);
 void powerstarve_set_amount(PowerStarve *ps, double amount01);
 double powerstarve_process(PowerStarve *ps, double x, double sample_rate);
 
+/* Stereo-linked noise gate for the chain's final output -- fixes a real
+ * problem where certain resonant-filter combinations (Moog/Korg/SEM/
+ * Polivoks, especially stacked) can develop a self-sustaining drone
+ * that doesn't decay even with zero input. Monitors the INPUT signal
+ * (pre-chain) to detect genuine silence, then ramps the OUTPUT gain
+ * down toward 0 over a slow release -- "ramps down slowly to silence"
+ * rather than an abrupt cutoff, which would sound like a mistake/glitch
+ * rather than a graceful fade. Attack (re-opening once real signal
+ * returns) is comparatively fast so legitimate playing isn't
+ * perceptibly clipped. Stereo-linked (single gain applied to both
+ * channels, monitoring the max of L/R input) so the gate can't cause
+ * one channel to duck independently of the other. */
+typedef struct {
+    double envelope;       /* tracks input activity level */
+    double gain;             /* current gate gain applied to output, 0.0-1.0 */
+    double thresholdLinear;
+    double envAttackCoeff, envReleaseCoeff;
+    double gateAttackCoeff, gateReleaseCoeff;
+} NoiseGate;
+
+void noisegate_init(NoiseGate *gate, double threshold_db, double sample_rate);
+/* Reads inputL/inputR (pre-chain, for silence detection) and writes the
+ * gated versions of outputL/outputR (post-chain) in place. */
+void noisegate_process(NoiseGate *gate, double inputL, double inputR, double *outputL, double *outputR);
+
 /* A single pedal slot: type + primary knob (0.0-1.0, meaning depends on
  * type's knob_mode) + per-pedal sub-parameters (Drive/Tone/Level) +
  * internal filter state.
@@ -434,6 +459,21 @@ typedef struct {
     SEMFilter sem;               /* used only by DISTROY_SEM */
     PolivoksFilter polivoks;      /* used only by DISTROY_POLIVOKS */
     double sample_rate;
+
+    /* Battery-starve per-module chaos (VST3-only feature; Move never
+     * sets battery_amount, so this is always inert there). Synced from
+     * DistroyChain's own battery_amount field at the start of
+     * distroy_chain_process() each block. See distroy_block_process()
+     * for how malfunction_type is applied -- each block gets its own
+     * randomized "malfunction personality" (assigned in
+     * distroy_block_set_type()) so different pedals in the same chain
+     * fail differently as the battery drains, rather than one uniform
+     * global effect. */
+    double battery_amount;             /* 0.0=normal, 1.0=dead */
+    unsigned int malfunction_type;      /* 0-3, randomized once per type-set */
+    unsigned int malfunction_rng;
+    int malfunction_cutout_remaining;
+    double malfunction_wobble_phase;
 } DistroyBlock;
 
 void distroy_block_init(DistroyBlock *b, DistroyType type, double sample_rate);
@@ -462,6 +502,11 @@ typedef struct {
     DistroyBlock slots[DISTROY_NUM_SLOTS];
     double sample_rate;
     int reverse; /* 0 = left-to-right (default), 1 = right-to-left */
+    double battery_amount; /* 0.0=normal, 1.0=dead. VST3-only -- Move
+                               never sets this, so it's always inert
+                               there. Synced into each slot's own
+                               battery_amount field at the start of
+                               distroy_chain_process(). */
 } DistroyChain;
 
 void distroy_chain_init(DistroyChain *c, double sample_rate);
