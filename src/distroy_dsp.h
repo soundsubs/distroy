@@ -66,6 +66,9 @@ typedef enum {
     DISTROY_NOIZ,          /* white/pink/red noise generator, capped at 66% level */
     DISTROY_TUBE,          /* vintage Russian vacuum tube saturation */
     DISTROY_CABL,          /* broken 1/4" cable/jack simulation -- random crackle/cutout */
+    DISTROY_SEM,           /* Oberheim SEM-style state-variable filter, controlled high resonance */
+    DISTROY_POLIVOKS,      /* Polivoks-style growly, heavily distorted resonant filter */
+    DISTROY_OCTAVE,        /* Fulltone Octafuzz-style octave pedal, up or down (random per load) */
     DISTROY_TYPE_COUNT
 } DistroyType;
 
@@ -74,7 +77,8 @@ typedef enum {
     DISTROY_KNOB_WET_DRY,
     DISTROY_KNOB_CUTOFF,
     DISTROY_KNOB_SENS,     /* auto-wah envelope sensitivity/depth */
-    DISTROY_KNOB_SIZE      /* speaker cabinet size sweep */
+    DISTROY_KNOB_SIZE,      /* speaker cabinet size sweep */
+    DISTROY_KNOB_RATE       /* LoFi sample-rate sweep */
 } DistroyKnobMode;
 
 typedef struct {
@@ -184,6 +188,39 @@ void korg35hp_init(Korg35HP *f, double sample_rate);
 void korg35hp_set(Korg35HP *f, double cutoff_hz, double resonance01, double drive01);
 double korg35hp_process(Korg35HP *f, double x);
 
+/* Oberheim SEM-style state-variable filter (Chamberlin topology, a
+ * well-known and inherently stable structure). Unlike the Moog ladder
+ * and Korg35 filters above, resonance here is deliberately kept short
+ * of true self-oscillation even at 100% -- damping (`q`) is scaled to
+ * stay well-controlled, so no "always 0 on randomize" safety rule is
+ * needed for this one (verified via a dedicated worst-case test, same
+ * rigor as the Moog/Korg ones). Lowpass output only (the topology also
+ * gives simultaneous highpass/bandpass, not exposed here). */
+typedef struct {
+    double low, band;
+    double f, q;
+} SEMFilter;
+
+void semfilter_init(SEMFilter *f);
+void semfilter_set(SEMFilter *f, double cutoff_hz, double resonance01, double sample_rate);
+double semfilter_process(SEMFilter *f, double x);
+
+/* Polivoks-style resonant filter -- same 2-pole ladder-style structure
+ * as Korg35LP, but with a harder clip (instead of a cubic soft-clip) on
+ * the resonant node, giving the distinctly gritty/"growly" heavily
+ * distorted character the real Russian synth's filter is known for. */
+typedef struct {
+    double stage[2];
+    double delay[2];
+    double p, k;
+    double resonance;
+    double drive;
+} PolivoksFilter;
+
+void polivoks_init(PolivoksFilter *f);
+void polivoks_set(PolivoksFilter *f, double cutoff_hz, double resonance01, double drive01, double sample_rate);
+double polivoks_process(PolivoksFilter *f, double x);
+
 /* Envelope follower -- fast attack, slower release, standard asymmetric
  * one-pole peak detector. Drives the auto-wah filter sweep (Mu-Tron,
  * Cry Baby 535Q). */
@@ -276,6 +313,8 @@ typedef struct {
     int stateSamplesRemaining;
     int eventCountdown;
     double cutoutLevel; /* how much signal survives during a cutout, never 0 */
+    double humLevel;      /* 0.0-0.10 (0-10%), randomized once per load -- simulates ground-loop/electrical interference */
+    double humPhase;
     SimpleNoise noise;
     unsigned int rngState;
 } CableSim;
@@ -392,12 +431,25 @@ typedef struct {
     SimpleNoise noise;        /* used only by DISTROY_TAPE and DISTROY_TUBE */
     NoiseGen noisegen;         /* used only by DISTROY_NOIZ */
     CableSim cable;             /* used only by DISTROY_CABL */
+    SEMFilter sem;               /* used only by DISTROY_SEM */
+    PolivoksFilter polivoks;      /* used only by DISTROY_POLIVOKS */
     double sample_rate;
 } DistroyBlock;
 
 void distroy_block_init(DistroyBlock *b, DistroyType type, double sample_rate);
 void distroy_block_set_type(DistroyBlock *b, DistroyType type);
 double distroy_block_process(DistroyBlock *b, double x);
+
+/* Current envelope-follower level (0.0-1.0-ish, not hard-clamped) for a
+ * block -- meaningful only for auto-wah types (Mu-Tron, Cry Baby),
+ * which are the only ones that use the `env` field. For any other
+ * type this just returns whatever stale/zero value happens to be in
+ * that unused struct field -- callers should check the block's type
+ * before treating this as meaningful. Exists purely for UI
+ * visualization (e.g. showing the incoming signal that's triggering
+ * the auto-wah's sweep), not used anywhere in the DSP signal path
+ * itself. */
+double distroy_block_get_envelope_level(const DistroyBlock *b);
 
 /* The full 8-slot chain. Signal direction is now toggleable (default
  * LEFT TO RIGHT: slot 0 processes first, slot 7 processes last) -- see

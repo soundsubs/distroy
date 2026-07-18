@@ -159,6 +159,49 @@ Verified via a dedicated stress test (`make test`): all 8 pedal types ×
 8 corner-case combinations of Drive/Tone/Level at their extremes (0.0
 and 1.0) produce finite output.
 
+## Filter/knob tuning pass (v0.9.0)
+
+- **Polivoks resonance capped at 40%** — even its intentionally growly
+  resonance was howling too much above that, per direct feedback.
+- **Oberheim SEM's knob now inversely couples cutoff and resonance** —
+  at knob=0, cutoff is near its minimum and resonance is at a randomized
+  ceiling (always 50-100%); at knob=1, cutoff is at its maximum and
+  resonance is 0. One knob sweeps both simultaneously in opposite
+  directions, matching how the real SEM's filter character shifts.
+- **LoFi's knob now directly controls sample rate** (increasing with the
+  knob, max sample rate at full turn) instead of being a wet/dry blend
+  — bit depth still randomizes independently. New `RATE` knob-mode label.
+  This freed LoFi's `sub_tone` back up for normal Tone/TiltEQ duty.
+- **Auto-wah envelope level now exposed** via
+  `distroy_block_get_envelope_level()` for UI visualization (used by the
+  VST3 to show incoming-signal activity near Mu-Tron/Cry Baby's knob —
+  no equivalent visualization exists in the Move version's constrained
+  UI, this is purely a new accessor for other consumers of the DSP core).
+
+## Three more new types + tweaks (v0.8.0)
+
+- **Oberheim SEM** — state-variable filter (Chamberlin topology), resonance
+  safely up to 100% without reaching true self-oscillation ("doesn't
+  fully resonate" per spec) — verified via a dedicated worst-case test,
+  same rigor as Moog/Korg's, but without needing their "always 0 on
+  randomize" safety rule since this topology stays controlled even at
+  max resonance.
+- **Polivoks** — same 2-pole ladder-style resonant filter structure as
+  Korg MS-20, but with a hard clip (not a cubic soft-clip) on the
+  resonant node, giving the distinctly gritty/"growly" heavily distorted
+  character the real Russian synth's filter is known for.
+- **Octafuzz** — Fulltone Octafuzz-style octave pedal, direction (up or
+  down) chosen randomly per load. Up uses the classic Octavia-style
+  full-wave-rectification technique; down reuses the WHAM pitch shifter
+  fixed at -12 semitones plus some grit.
+- **Noiz's cap lowered 66% → 50%** — even 66% got too loud once amplified
+  downstream in a chain.
+- **Tube improved** — gentler/rounder saturation curve plus explicit
+  even-harmonic generation (a classic `x*|x|` technique) for genuine
+  added warmth, not just clipping.
+- **Cable Fault gets 60Hz hum** — randomized 0-10% mains hum mixed in
+  continuously, simulating electrical interference/ground loop.
+
 ## Signal direction default changed (v0.7.0)
 
 Previously right-to-left only (slot 7 processes first). Now defaults to

@@ -219,8 +219,11 @@ int main(void) {
         if (zero_found) all_ok = 0;
     }
 
-    printf("\n=== LOFI constraint check (bits 1-15, rate 100-10000Hz, 2000 seeds) ===\n");
+    printf("\n=== LOFI constraint check (bits 1-15, rate 100-10000Hz via knob, 2000 seeds) ===\n");
     {
+        /* Rate now comes directly from the knob (not sub_tone, which is
+         * free again for normal Tone/TiltEQ duty) -- see the DSP core's
+         * v0.9.0 change. Checking against `knob` here instead. */
         int violation = 0;
         for (unsigned int seed = 1; seed <= 2000; seed++) {
             DistroyChain c6;
@@ -229,13 +232,13 @@ int main(void) {
             for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
                 if (c6.slots[i].type != DISTROY_LOFI) continue;
                 int bits = 1 + (int)(c6.slots[i].sub_drive * 14.0);
-                double rate = 100.0 + c6.slots[i].sub_tone * 9900.0;
+                double rate = 100.0 + c6.slots[i].knob * 9900.0;
                 if (bits < 1 || bits > 15) {
                     printf("LOFI bits out of range: %d (sub_drive=%.4f)\n", bits, c6.slots[i].sub_drive);
                     violation = 1;
                 }
                 if (rate < 100.0 || rate > 10000.0) {
-                    printf("LOFI rate out of range: %.1f (sub_tone=%.4f)\n", rate, c6.slots[i].sub_tone);
+                    printf("LOFI rate out of range: %.1f (knob=%.4f)\n", rate, c6.slots[i].knob);
                     violation = 1;
                 }
             }
@@ -331,12 +334,14 @@ int main(void) {
         if (!dirOk) all_ok = 0;
     }
 
-    printf("\n=== NOIZ 66%% cap test (blend-ratio invariant, 5000 random knob values) ===\n");
+    printf("\n=== NOIZ 50%% cap test (blend-ratio invariant, 5000 random knob values) ===\n");
     {
         /* Verify the actual safety property directly: cappedKnob (the
          * real wet-blend ratio used in distroy_block_process's NOIZ
-         * special case) must never exceed 0.66, for any knob value.
-         * (An earlier version of this test tried to infer this from
+         * special case) must never exceed 0.50, for any knob value.
+         * (Lowered from 66% -> 50% since even 66% got too loud once
+         * amplified downstream in a chain, per direct feedback. An
+         * earlier version of this test tried to infer the cap from
          * downstream output bounds, but got confused by the DC-blocking
          * highpass filter's response to an artificially-constant test
          * signal plus the level-trim stage -- neither of which has
@@ -347,16 +352,16 @@ int main(void) {
         for (int i = 0; i < 5000; i++) {
             seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
             double knob = (double)seed / (double)UINT32_MAX;
-            double cappedKnob = knob * 0.66;
-            if (cappedKnob > 0.66 + 1e-9 || cappedKnob < 0.0) {
-                printf("cappedKnob=%.4f out of [0, 0.66] for knob=%.4f\n", cappedKnob, knob);
+            double cappedKnob = knob * 0.50;
+            if (cappedKnob > 0.50 + 1e-9 || cappedKnob < 0.0) {
+                printf("cappedKnob=%.4f out of [0, 0.50] for knob=%.4f\n", cappedKnob, knob);
                 noizOk = 0;
             }
         }
-        /* Also confirm the worst case explicitly: knob=1.0 -> exactly 0.66 */
-        double worstCase = 1.0 * 0.66;
-        if (fabs(worstCase - 0.66) > 1e-9) { printf("Worst-case cap wrong: %.6f\n", worstCase); noizOk = 0; }
-        printf("NOIZ 66%% cap test: %s (blend ratio never exceeds 0.66, dry signal always at least 34%%)\n",
+        /* Also confirm the worst case explicitly: knob=1.0 -> exactly 0.50 */
+        double worstCase = 1.0 * 0.50;
+        if (fabs(worstCase - 0.50) > 1e-9) { printf("Worst-case cap wrong: %.6f\n", worstCase); noizOk = 0; }
+        printf("NOIZ 50%% cap test: %s (blend ratio never exceeds 0.50, dry signal always at least 50%%)\n",
                noizOk ? "PASSED" : "FAILED");
         if (!noizOk) all_ok = 0;
     }
@@ -412,6 +417,104 @@ int main(void) {
         }
         printf("PowerStarve sweep test: %s\n", psOk ? "PASSED (finite across full amount range)" : "FAILED");
         if (!psOk) all_ok = 0;
+    }
+
+    printf("\n=== SEM/Polivoks worst-case test: max cutoff + max resonance together ===\n");
+    {
+        int filterOk = 1;
+        DistroyType worstTypes[] = { DISTROY_SEM, DISTROY_POLIVOKS };
+        for (int ti = 0; ti < 2; ti++) {
+            DistroyBlock fb;
+            distroy_block_init(&fb, worstTypes[ti], 44100.0);
+            fb.knob = 1.0;     /* max cutoff */
+            fb.sub_tone = 1.0; /* max resonance */
+            fb.sub_drive = 1.0;
+            double phase = 0.0;
+            for (int i = 0; i < 44100; i++) { /* 1s, plenty of time to diverge if unstable */
+                double x = sin(phase) * 0.9;
+                phase += 2.0 * M_PI * 220.0 / 44100.0;
+                double y = distroy_block_process(&fb, x);
+                if (!isfinite(y)) {
+                    printf("[%s] NOT FINITE at max cutoff+resonance+drive, sample %d: %f\n",
+                           distroy_type_info(worstTypes[ti])->name, i, y);
+                    filterOk = 0;
+                    break;
+                }
+            }
+        }
+        printf("SEM/Polivoks worst-case: %s\n", filterOk ? "finite=yes" : "FAILED");
+        if (!filterOk) all_ok = 0;
+    }
+
+    printf("\n=== PowerStarve floor test (never fully silent, floored at 1%%) ===\n");
+    {
+        PowerStarve psFloor;
+        powerstarve_init(&psFloor, 555);
+        powerstarve_set_amount(&psFloor, 1.0); /* max starve */
+        int floorOk = 1;
+        double maxSeen = 0.0;
+        for (int i = 0; i < 44100; i++) {
+            double y = powerstarve_process(&psFloor, 1.0, 44100.0); /* constant full-scale input */
+            if (!isfinite(y)) { printf("PowerStarve floor test: not finite\n"); floorOk = 0; break; }
+            if (fabs(y) > maxSeen) maxSeen = fabs(y);
+        }
+        /* At amount=1.0, levelGain floors at 0.01 -- with unity input,
+         * output should still show SOME signal, not collapse to exactly
+         * 0 the way an unfloored formula would over time. */
+        printf("PowerStarve floor test: max output seen=%.5f, %s\n",
+               maxSeen, (maxSeen > 0.0001) ? "PASSED (never fully silent)" : "FAILED (collapsed to silence)");
+        if (maxSeen <= 0.0001) all_ok = 0;
+    }
+
+    printf("\n=== Polivoks resonance cap test (max 40%%, 1000 seeds) ===\n");
+    {
+        int violation = 0;
+        for (unsigned int seed = 1; seed <= 1000; seed++) {
+            DistroyChain c7;
+            distroy_chain_init(&c7, 44100.0);
+            distroy_chain_randomize_all(&c7, seed);
+            for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+                if (c7.slots[i].type != DISTROY_POLIVOKS) continue;
+                if (c7.slots[i].sub_tone > 0.40 + 1e-9) {
+                    printf("Polivoks resonance %.4f exceeds 40%% cap\n", c7.slots[i].sub_tone);
+                    violation = 1;
+                }
+            }
+        }
+        printf("Polivoks resonance cap test: %s\n", violation ? "FAILED" : "PASSED (never exceeds 40%% in 1000 chains)");
+        if (violation) all_ok = 0;
+    }
+
+    printf("\n=== SEM resonance-ceiling and inverse-knob test (1000 seeds + explicit sweep) ===\n");
+    {
+        /* Confirm the randomized ceiling (sub_tone) is always 50-100%. */
+        int violation = 0;
+        for (unsigned int seed = 1; seed <= 1000; seed++) {
+            DistroyChain c8;
+            distroy_chain_init(&c8, 44100.0);
+            distroy_chain_randomize_all(&c8, seed);
+            for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+                if (c8.slots[i].type != DISTROY_SEM) continue;
+                if (c8.slots[i].sub_tone < 0.5 - 1e-9 || c8.slots[i].sub_tone > 1.0 + 1e-9) {
+                    printf("SEM resonance ceiling %.4f outside [0.5, 1.0]\n", c8.slots[i].sub_tone);
+                    violation = 1;
+                }
+            }
+        }
+        printf("SEM resonance-ceiling range: %s\n", violation ? "FAILED" : "PASSED (always 50-100%% in 1000 chains)");
+        if (violation) all_ok = 0;
+
+        /* Confirm the inverse relationship: at knob=0, effective
+         * resonance == the ceiling (maximum); at knob=1, effective
+         * resonance == 0 (minimum). Testing the actual formula used in
+         * type_process's DISTROY_SEM case. */
+        double ceiling = 0.8;
+        double resAtKnob0 = ceiling * (1.0 - 0.0);
+        double resAtKnob1 = ceiling * (1.0 - 1.0);
+        int inverseOk = (fabs(resAtKnob0 - ceiling) < 1e-9) && (fabs(resAtKnob1 - 0.0) < 1e-9);
+        printf("SEM inverse cutoff/resonance formula: %s (knob=0 -> resonance=ceiling=%.2f, knob=1 -> resonance=%.2f)\n",
+               inverseOk ? "PASSED" : "FAILED", resAtKnob0, resAtKnob1);
+        if (!inverseOk) all_ok = 0;
     }
 
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");

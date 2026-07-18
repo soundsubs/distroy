@@ -30,7 +30,7 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_CRYBABY]      = { "Cry Baby 535Q", "CRYB",   DISTROY_KNOB_SENS },
     [DISTROY_JENSEN]       = { "Jensen",        "JENSEN", DISTROY_KNOB_WET_DRY },
     [DISTROY_LUNDAHL]      = { "Lundahl",       "LUND",   DISTROY_KNOB_WET_DRY },
-    [DISTROY_LOFI]         = { "LoFi",          "LOFI",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_LOFI]         = { "LoFi",          "LOFI",   DISTROY_KNOB_RATE },
     [DISTROY_FZ1W]         = { "Boss FZ-1W",    "FZ1W",   DISTROY_KNOB_WET_DRY },
     [DISTROY_CLIP]         = { "Clip",          "CLIP",   DISTROY_KNOB_WET_DRY },
     [DISTROY_REKT]         = { "Rekt",          "REKT",   DISTROY_KNOB_WET_DRY },
@@ -40,6 +40,9 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_NOIZ]         = { "Noiz",          "NOIZ",   DISTROY_KNOB_WET_DRY },
     [DISTROY_TUBE]         = { "Tube",          "TUBE",   DISTROY_KNOB_WET_DRY },
     [DISTROY_CABL]         = { "Cable Fault",   "CABL",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_SEM]          = { "Oberheim SEM",  "SEM",    DISTROY_KNOB_CUTOFF },
+    [DISTROY_POLIVOKS]     = { "Polivoks",      "POLI",   DISTROY_KNOB_CUTOFF },
+    [DISTROY_OCTAVE]       = { "Octafuzz",      "OCT",    DISTROY_KNOB_WET_DRY },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
@@ -53,6 +56,7 @@ const char* distroy_knob_mode_label(DistroyKnobMode mode) {
         case DISTROY_KNOB_CUTOFF: return "CUTOFF";
         case DISTROY_KNOB_SENS: return "SENS";
         case DISTROY_KNOB_SIZE: return "SIZE";
+        case DISTROY_KNOB_RATE: return "RATE";
         default: return "MIX";
     }
 }
@@ -434,22 +438,30 @@ double noisegen_process(NoiseGen *n, NoiseColour colour) {
  * Broken 1/4" cable/jack fault simulation (CABL)
  * ------------------------------------------------------------------- */
 
+static unsigned int cablesim_rand_seeded(unsigned int *state) {
+    unsigned int s = *state;
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+    *state = s;
+    return s;
+}
+
 void cablesim_init(CableSim *c, unsigned int seed) {
     c->state = CABLE_NORMAL;
     c->stateSamplesRemaining = 0;
     c->eventCountdown = 4410; /* ~0.1s before the first possible event */
     c->cutoutLevel = 0.1;
+    c->humPhase = 0.0;
     noise_init(&c->noise, seed);
     c->rngState = seed != 0 ? seed : 1;
+    /* 60Hz mains hum, randomized once per load, 0-10% -- simulates a
+     * ground loop/electrical interference a real bad cable can pick up. */
+    c->humLevel = (double)(cablesim_rand_seeded(&c->rngState) % 1000) / 1000.0 * 0.10;
 }
 
 static unsigned int cablesim_rand(CableSim *c) {
-    unsigned int s = c->rngState;
-    s ^= s << 13;
-    s ^= s >> 17;
-    s ^= s << 5;
-    c->rngState = s;
-    return s;
+    return cablesim_rand_seeded(&c->rngState);
 }
 
 double cablesim_process(CableSim *c, double x, double severity01, double sample_rate) {
@@ -490,18 +502,107 @@ double cablesim_process(CableSim *c, double x, double severity01, double sample_
         }
     }
 
+    double out;
     switch (c->state) {
         case CABLE_CRACKLE:
-            return x + noise_next(&c->noise) * (0.3 + sev * 0.4);
+            out = x + noise_next(&c->noise) * (0.3 + sev * 0.4);
+            break;
         case CABLE_CUTOUT:
-            return x * c->cutoutLevel + noise_next(&c->noise) * 0.05;
+            out = x * c->cutoutLevel + noise_next(&c->noise) * 0.05;
+            break;
         case CABLE_NORMAL:
         default:
             /* Subtle baseline crackle even when "working" -- a
              * genuinely bad cable has some character even between
              * glitch events. */
-            return x + noise_next(&c->noise) * (0.003 + sev * 0.01);
+            out = x + noise_next(&c->noise) * (0.003 + sev * 0.01);
+            break;
     }
+
+    /* 60Hz mains hum -- randomized level (0-10%) set once at load,
+     * present continuously regardless of glitch state (a real ground
+     * loop hums all the time, not just during crackles/cutouts). */
+    c->humPhase += 2.0 * M_PI * 60.0 / sample_rate;
+    if (c->humPhase > 2.0 * M_PI) c->humPhase -= 2.0 * M_PI;
+    out += sin(c->humPhase) * c->humLevel;
+
+    return out;
+}
+
+/* ---------------------------------------------------------------------
+ * Oberheim SEM-style state-variable filter
+ * ------------------------------------------------------------------- */
+
+void semfilter_init(SEMFilter *f) {
+    f->low = 0.0;
+    f->band = 0.0;
+    f->f = 0.3;
+    f->q = 1.0;
+}
+
+void semfilter_set(SEMFilter *f, double cutoff_hz, double resonance01, double sample_rate) {
+    double cutoff = clampd(cutoff_hz, 20.0, sample_rate * 0.45);
+    f->f = 2.0 * sin(M_PI * cutoff / sample_rate);
+    /* q_min kept safely above 0 -- close to self-oscillation at 100%
+     * resonance but deliberately not reaching it ("doesn't fully
+     * resonate" per spec), unlike the Moog ladder/Korg35 above. */
+    const double q_max = 1.2; /* resonance01=0 -> heavily damped */
+    const double q_min = 0.18; /* resonance01=1 -> peaky but controlled */
+    f->q = q_max - resonance01 * (q_max - q_min);
+}
+
+double semfilter_process(SEMFilter *f, double x) {
+    double high = x - f->low - f->q * f->band;
+    f->band += f->f * high;
+    f->low += f->f * f->band;
+    /* Safety clamp -- same belt-and-suspenders reasoning as the Moog
+     * ladder/Korg35 filters, even though this topology is inherently
+     * better-behaved. */
+    f->band = clampd(f->band, -8.0, 8.0);
+    f->low = clampd(f->low, -8.0, 8.0);
+    return f->low;
+}
+
+/* ---------------------------------------------------------------------
+ * Polivoks-style growly resonant filter
+ * ------------------------------------------------------------------- */
+
+void polivoks_init(PolivoksFilter *f) {
+    f->stage[0] = 0.0; f->stage[1] = 0.0;
+    f->delay[0] = 0.0; f->delay[1] = 0.0;
+    f->p = 0.3; f->k = 0.0;
+    f->resonance = 0.0;
+    f->drive = 1.0;
+}
+
+void polivoks_set(PolivoksFilter *f, double cutoff_hz, double resonance01, double drive01, double sample_rate) {
+    double fc = clampd(cutoff_hz / (sample_rate * 0.5), 0.0001, 0.99);
+    f->p = fc * (1.8 - 0.8 * fc);
+    f->k = 2.0 * sin(fc * M_PI * 0.5) - 1.0;
+    double t1 = (1.0 - f->p) * 1.386249;
+    double t2 = 12.0 + t1 * t1;
+    f->resonance = resonance01 * 3.2 * (t2 + 6.0 * t1) / (t2 - 6.0 * t1);
+    f->drive = 1.0 + drive01 * 6.0;
+}
+
+double polivoks_process(PolivoksFilter *f, double x) {
+    x *= f->drive;
+    x = tanh(x * 1.5); /* pre-saturation stage */
+
+    double input = x - f->resonance * f->stage[1];
+    f->stage[0] = input * f->p + f->delay[0] * f->p - f->k * f->stage[0];
+    f->stage[1] = f->stage[0] * f->p + f->delay[1] * f->p - f->k * f->stage[1];
+
+    /* HARD clip (not the cubic soft-clip the Korg35 uses) on the
+     * resonant node -- this is what gives Polivoks its distinctly
+     * gritty/"growly" heavily distorted character even at moderate
+     * resonance, rather than a cleaner resonant peak. */
+    f->stage[1] = clampd(f->stage[1] * 1.3, -1.0, 1.0);
+
+    f->delay[0] = input;
+    f->delay[1] = f->stage[0];
+
+    return f->stage[1];
 }
 
 /* ---------------------------------------------------------------------
@@ -602,9 +703,10 @@ double powerstarve_process(PowerStarve *ps, double x, double sample_rate) {
     double wobble = 1.0 + sin(ps->lfoPhase) * a * 0.18;
 
     /* Overall level loss -- approaches near-total signal loss at
-     * amount=1.0, deliberately (unlike CABL, this one IS allowed to go
-     * almost fully silent -- "almost disconnect power" per spec). */
-    double levelGain = pow(1.0 - a, 2.0);
+     * amount=1.0, but floored at 1% rather than allowed to reach exact
+     * 0 (per feedback: should never cause true silence, "near silence,
+     * like 1%" instead). */
+    double levelGain = 0.01 + 0.99 * pow(1.0 - a, 2.0);
 
     /* Power-supply noise bleeding in as headroom drops. */
     double hiss = noise_next(&ps->noise) * a * 0.02;
@@ -720,6 +822,7 @@ static double tilt_center_hz(DistroyType type) {
         case DISTROY_WHAM:         return 1000.0;
         case DISTROY_TAPE:         return 1500.0;
         case DISTROY_TUBE:         return 1200.0;
+        case DISTROY_OCTAVE:       return 900.0;
         default:                   return 1000.0;
     }
 }
@@ -793,6 +896,12 @@ void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
             break;
         case DISTROY_CABL:
             cablesim_init(&b->cable, (unsigned int)(uintptr_t)b ^ 0x27d4eb2du);
+            break;
+        case DISTROY_SEM:
+            semfilter_init(&b->sem);
+            break;
+        case DISTROY_POLIVOKS:
+            polivoks_init(&b->polivoks);
             break;
         default:
             break;
@@ -908,10 +1017,17 @@ static double type_process(DistroyBlock *b, double x, double drive) {
             return biquad_process(&b->color_peak, y); /* more colored low-mid */
         }
         case DISTROY_LOFI: {
-            /* sub_drive/sub_tone repurposed as bit-depth/sample-rate
-             * encodes (see header comment) rather than Drive/Tone. */
+            /* RATE-mode: "drive" is the knob value, now directly
+             * controlling sample rate (increasing with the knob -- at
+             * max knob, sample rate is maximum), per spec. This
+             * replaced the old WET_DRY blend where sub_tone encoded a
+             * randomized sample rate and the knob was just a blend
+             * amount. sub_drive still randomly encodes bit depth
+             * (unrelated to the knob) -- never 16-bit. sub_tone is now
+             * free for normal TiltEQ tone duty again (LOFI removed from
+             * the tilt-skip list). */
             int bits = 1 + (int)(b->sub_drive * 14.0); /* 1-15, never 16 */
-            double target_hz = 100.0 + b->sub_tone * 9900.0; /* 100-10000 Hz, never 44100 */
+            double target_hz = 100.0 + drive * 9900.0; /* 100-10000 Hz, increases with knob, never 44100 */
             double y = decimator_process(&b->decim, x, target_hz, b->sample_rate);
             return quantize_bits(y, bits);
         }
@@ -982,13 +1098,20 @@ static double type_process(DistroyBlock *b, double x, double drive) {
             return noisegen_process(&b->noisegen, colour);
         }
         case DISTROY_TUBE: {
-            /* Vintage Russian tube character -- asymmetric soft
-             * saturation (differing pos/neg curve, modeling triode-
-             * style asymmetric clipping with a "grittier" bias than a
-             * cleaner Western-tube model), warm HF rolloff, and a very
-             * subtle noise floor (real tubes have some inherent hiss). */
-            double gain = 1.4 + drive * 2.6;
-            double y = asym_soft_clip(gain * x, 2.2 + drive * 1.0, 2.8 + drive * 1.6);
+            /* Vintage Russian tube character -- gently rounded
+             * asymmetric saturation (lower steepness than before =
+             * smoother/rounder transition into clipping, per feedback
+             * that it should "round off waveforms"), PLUS explicit
+             * even-harmonic generation (the x*|x| term below is a
+             * classic, well-known technique for adding warm 2nd-
+             * harmonic "tube" character on top of the clipping curve
+             * itself), warm HF rolloff, and a very subtle noise floor
+             * (real tubes have some inherent hiss). */
+            double gain = 1.3 + drive * 2.2;
+            double driven = gain * x;
+            double y = asym_soft_clip(driven, 1.6 + drive * 0.6, 2.0 + drive * 0.8);
+            double harmonic = driven * fabs(driven) * 0.15; /* adds warm 2nd-harmonic content */
+            y = y * 0.85 + harmonic * 0.15;
             y = onepole_process(&b->color_lp, y);
             double hiss = noise_next(&b->noise) * 0.0015;
             return y + hiss;
@@ -1002,6 +1125,54 @@ static double type_process(DistroyBlock *b, double x, double drive) {
              * moment to moment). */
             return cablesim_process(&b->cable, x, drive, b->sample_rate);
         }
+        case DISTROY_SEM: {
+            /* CUTOFF-mode, but with an inverse cutoff/resonance
+             * coupling per spec: "knob controlling increasing filter
+             * cutoff frequency while decreasing Resonance. So with
+             * knob at 0, cutoff is near 0, resonance is maximum. With
+             * knob at 100%, cutoff is maximum, resonance is minimum."
+             * sub_tone (repurposed, tilt skipped) holds the randomized
+             * resonance CEILING (always 0.5-1.0, see
+             * distroy_chain_randomize_all()) -- knob sweeps resonance
+             * down from that ceiling toward 0 as it sweeps cutoff up.
+             * Safe up to 100% resonance (see semfilter_set()'s comment
+             * -- this topology doesn't reach true self-oscillation, no
+             * "always 0" safety rule needed here unlike Moog/Korg). */
+            double cutoff_hz = 80.0 * pow(8000.0 / 80.0, drive);
+            double resonance = b->sub_tone * (1.0 - drive);
+            semfilter_set(&b->sem, cutoff_hz, resonance, b->sample_rate);
+            return semfilter_process(&b->sem, x);
+        }
+        case DISTROY_POLIVOKS: {
+            /* CUTOFF-mode, same pattern as SEM -- sub_tone = resonance.
+             * Also safe at high resonance (same 2-pole ladder-style
+             * structure as Korg35, just with a harder clip instead of a
+             * cubic soft-clip on the resonant node for the "growly"
+             * distorted character). */
+            double cutoff_hz = 80.0 * pow(8000.0 / 80.0, drive);
+            polivoks_set(&b->polivoks, cutoff_hz, b->sub_tone, b->sub_drive, b->sample_rate);
+            return polivoks_process(&b->polivoks, x);
+        }
+        case DISTROY_OCTAVE: {
+            /* WET_DRY-mode. sub_tone (NOT repurposed for tilt-skip --
+             * this type keeps normal Tone/TiltEQ, sub_tone here just
+             * ALSO happens to pick direction, read once effectively
+             * fixed per load since it doesn't change) picks octave
+             * direction: <0.5 up (classic Octavia-style full-wave
+             * rectification octave-up-fuzz technique), >=0.5 down
+             * (reuses the WHAM pitch shifter fixed at -12 semitones,
+             * plus some grit for authenticity -- real octave-down fuzz
+             * pedals aren't perfectly clean either). */
+            double gain = 3.0 + drive * 15.0;
+            if (b->sub_tone >= 0.5) {
+                pitchshift_set_semitones(&b->pitch, -12.0);
+                double shifted = pitchshift_process(&b->pitch, x);
+                return asym_soft_clip(gain * 0.6 * shifted, 3.0, 3.0);
+            } else {
+                double driven = tanh(gain * x);
+                return fabs(driven); /* full-wave rectify -- dc_block downstream removes the resulting offset */
+            }
+        }
         default:
             return x;
     }
@@ -1011,13 +1182,17 @@ double distroy_block_process(DistroyBlock *b, double x) {
     const DistroyTypeInfo *info = distroy_type_info(b->type);
     double wet, out;
     /* These types repurpose sub_tone for something other than TiltEQ
-     * tone (Moog/Korg: Resonance, LOFI: sample-rate encode, NOIZ: noise
-     * colour select) -- keep the tone stage neutral/flat for them so it
+     * tone (Moog/Korg/SEM/Polivoks: Resonance, NOIZ: noise colour
+     * select) -- keep the tone stage neutral/flat for them so it
      * doesn't double up. NOTE: this is NOT simply "all CUTOFF-mode
      * types" -- SPKR is also CUTOFF mode but keeps normal Tone/TiltEQ,
-     * since its sub_tone still means Tone for that type. */
+     * since its sub_tone still means Tone for that type. LOFI USED TO
+     * be in this list (sub_tone encoded sample rate) but the knob now
+     * controls sample rate directly, freeing sub_tone back up for
+     * normal Tone/TiltEQ duty. */
     int skip_tilt = (b->type == DISTROY_MOOG_LADDER || b->type == DISTROY_KORG_MS20
-                      || b->type == DISTROY_LOFI || b->type == DISTROY_NOIZ);
+                      || b->type == DISTROY_NOIZ
+                      || b->type == DISTROY_SEM || b->type == DISTROY_POLIVOKS);
 
     b->tone_stage.tone = skip_tilt ? 0.5 : b->sub_tone;
 
@@ -1033,11 +1208,11 @@ double distroy_block_process(DistroyBlock *b, double x) {
         out = wet;
     } else if (b->type == DISTROY_NOIZ) {
         /* Special case: standard WET_DRY blend formula, but the wet
-         * contribution is capped at 66% max regardless of knob
-         * position, per spec ("can never reach 66% at full, otherwise
-         * it would interrupt the signal") -- guarantees at least 34%
-         * dry signal always survives. */
-        double cappedKnob = b->knob * 0.66;
+         * contribution is capped -- originally 66%, lowered to 50%
+         * since even 66% got too loud once amplified downstream in a
+         * chain, per direct feedback. Guarantees at least 50% dry
+         * signal always survives. */
+        double cappedKnob = b->knob * 0.50;
         wet = type_process(b, x, b->sub_drive);
         out = x * (1.0 - cappedKnob) + wet * cappedKnob;
     } else if (info->knob_mode == DISTROY_KNOB_WET_DRY) {
@@ -1060,6 +1235,10 @@ double distroy_block_process(DistroyBlock *b, double x) {
      * staging through the rest of the chain. */
     double level_gain = 0.7 + b->sub_level * 0.6;
     return out * level_gain;
+}
+
+double distroy_block_get_envelope_level(const DistroyBlock *b) {
+    return b->env.envelope;
 }
 
 /* ---------------------------------------------------------------------
@@ -1135,6 +1314,19 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
              * README's open questions) where the user can dial it in
              * deliberately; randomization just leaves it off. */
             tone_rand = 0.0;
+        } else if (t == DISTROY_POLIVOKS) {
+            /* Capped at 40% max -- even Polivoks' intentionally growly
+             * resonance was howling/resonating too much above that,
+             * per direct feedback. */
+            tone_rand *= 0.4;
+        } else if (t == DISTROY_SEM) {
+            /* Always randomizes to 50-100% -- this is the resonance
+             * CEILING used at knob=0 (see type_process: knob sweeps
+             * cutoff up while sweeping resonance down from this
+             * ceiling toward 0), so it's deliberately always
+             * substantial, per spec ("should always randomize to have
+             * resonance above 50%"). */
+            tone_rand = 0.5 + tone_rand * 0.5;
         }
         c->slots[i].sub_tone = tone_rand;
 
