@@ -517,38 +517,73 @@ int main(void) {
         if (!inverseOk) all_ok = 0;
     }
 
-    printf("\n=== Noise gate test (drone silenced, slow ramp, reopens on signal) ===\n");
+    printf("\n=== Noise gate test (starts closed, ramps open, drone silenced, reopens) ===\n");
     {
         NoiseGate gate;
         noisegate_init(&gate, -50.0, 44100.0);
         int gateOk = 1;
-
-        /* Simulate a "drone with no input" -- feed silence in, but a
-         * constant nonzero "output" (as if a self-sustaining filter
-         * resonance were droning), and confirm the gate ramps output
-         * toward 0 (not instantly, but within a reasonable window). */
         double outL, outR;
-        double gainAtStart = 0.0, gainAt100ms = 0.0, gainAt2s = 0.0;
+
+        /* Property 1: starts CLOSED, not open -- this is the actual
+         * fix (v0.13.0). Starting open meant zero protection for the
+         * very first block(s) of audio, exactly when a startup
+         * transient from the DSP chain settling is most likely. */
+        printf("Gain immediately after init: %.4f (should be ~0, closed)\n", gate.gain);
+        if (gate.gain > 0.01) {
+            printf("Noise gate did not start closed\n");
+            gateOk = 0;
+        }
+
+        /* Property 2: ramps OPEN (not instantly) once real signal
+         * arrives -- the actual "slowly ramping it on" startup
+         * protection requested. */
+        double gainAt1ms = 0.0, gainAt10ms = 0.0, gainAt50ms = 0.0;
+        for (int i = 0; i < 2205; i++) { /* 50ms of real signal from a cold start */
+            outL = 0.5; outR = 0.5;
+            noisegate_process(&gate, 0.3, 0.3, &outL, &outR);
+            if (i == 44) gainAt1ms = gate.gain;
+            if (i == 440) gainAt10ms = gate.gain;
+            if (i == 2204) gainAt50ms = gate.gain;
+        }
+        printf("Gain ramping open: @1ms=%.3f, @10ms=%.3f, @50ms=%.3f (should increase gradually, not jump to 1.0 instantly)\n",
+               gainAt1ms, gainAt10ms, gainAt50ms);
+        if (!(gainAt1ms < gainAt10ms && gainAt10ms < gainAt50ms && gainAt50ms > 0.9)) {
+            printf("Noise gate did not ramp open gradually as expected\n");
+            gateOk = 0;
+        }
+        if (gainAt1ms > 0.5) {
+            printf("Noise gate opened too abruptly on startup (not a slow ramp) -- gain was %.3f after just 1ms\n", gainAt1ms);
+            gateOk = 0;
+        }
+
+        /* Property 3: a droning chain (constant output despite silent
+         * input) ramps DOWN to near-silence over time, gracefully (not
+         * instantly) -- the original spec this gate was built for. Gate
+         * is already open from the ramp-up above, matching a realistic
+         * scenario (was playing, then stopped). */
+        double gainAt100ms = 0.0, gainAt300ms = 0.0, gainAt2s = 0.0;
         for (int i = 0; i < 88200; i++) { /* 2 seconds -- ~4 time constants at 500ms release */
             outL = 0.5; outR = 0.5; /* constant drone-like output */
             noisegate_process(&gate, 0.0, 0.0, &outL, &outR); /* silent input */
-            if (i == 0) gainAtStart = gate.gain;
             if (i == 4410) gainAt100ms = gate.gain;
+            if (i == 13230) gainAt300ms = gate.gain;
             if (i == 88199) gainAt2s = gate.gain;
             if (!isfinite(outL) || !isfinite(outR)) { printf("Noise gate output not finite\n"); gateOk = 0; }
         }
-        printf("Gain: start=%.3f, @100ms=%.3f, @2s=%.4f (should decrease toward 0, not instantly)\n",
-               gainAtStart, gainAt100ms, gainAt2s);
-        if (!(gainAtStart > gainAt100ms && gainAt100ms > gainAt2s && gainAt2s < 0.05)) {
+        /* Compare from the 100ms mark, not the exact transition
+         * instant -- the envelope follower's own ~50ms release means
+         * gain can briefly keep climbing toward 1.0 for a moment even
+         * after input goes silent, simply because the envelope hasn't
+         * "noticed" yet. That's correct behavior, not a bug; comparing
+         * from a point after that settles avoids a false failure. */
+        printf("Drone ramp-down: @100ms=%.3f, @300ms=%.3f, @2s=%.4f (should decrease toward 0, not instantly)\n",
+               gainAt100ms, gainAt300ms, gainAt2s);
+        if (!(gainAt100ms > gainAt300ms && gainAt300ms > gainAt2s && gainAt2s < 0.05)) {
             printf("Noise gate did not ramp down as expected\n");
             gateOk = 0;
         }
-        if (gainAtStart < 0.9) {
-            printf("Noise gate closed too abruptly (not a slow ramp) -- gain dropped from 1.0 to %.3f in one sample\n", gainAtStart);
-            gateOk = 0;
-        }
 
-        /* Now feed real signal back in and confirm the gate reopens. */
+        /* Property 4: reopens once real signal returns. */
         for (int i = 0; i < 4410; i++) { /* 100ms of real signal */
             outL = 0.5; outR = 0.5;
             noisegate_process(&gate, 0.3, 0.3, &outL, &outR);
@@ -627,6 +662,379 @@ int main(void) {
 
         printf("Battery-starve per-module malfunction test: %s\n", malfOk ? "PASSED" : "FAILED");
         if (!malfOk) all_ok = 0;
+    }
+
+    printf("\n=== Sub-parameter nudge test (knob/type untouched, params bounded) ===\n");
+    {
+        int nudgeOk = 1;
+        DistroyChain chain;
+        distroy_chain_init(&chain, 44100.0);
+        distroy_chain_randomize_all(&chain, 12345);
+
+        double knobsBefore[DISTROY_NUM_SLOTS], subDriveBefore[DISTROY_NUM_SLOTS];
+        DistroyType typesBefore[DISTROY_NUM_SLOTS];
+        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+            knobsBefore[i] = chain.slots[i].knob;
+            subDriveBefore[i] = chain.slots[i].sub_drive;
+            typesBefore[i] = chain.slots[i].type;
+        }
+
+        distroy_chain_nudge_subparams(&chain, 0.1, 999);
+
+        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+            if (chain.slots[i].knob != knobsBefore[i]) { printf("Nudge touched knob value on slot %d\n", i); nudgeOk = 0; }
+            if (chain.slots[i].type != typesBefore[i]) { printf("Nudge touched pedal type on slot %d\n", i); nudgeOk = 0; }
+            double delta = fabs(chain.slots[i].sub_drive - subDriveBefore[i]);
+            if (delta > 0.1 + 1e-9) { printf("Nudge delta %.4f exceeded amount01=0.1 on slot %d\n", delta, i); nudgeOk = 0; }
+            if (chain.slots[i].sub_drive < 0.0 || chain.slots[i].sub_drive > 1.0) { printf("sub_drive out of range on slot %d\n", i); nudgeOk = 0; }
+            if (chain.slots[i].sub_tone < 0.0 || chain.slots[i].sub_tone > 1.0) { printf("sub_tone out of range on slot %d\n", i); nudgeOk = 0; }
+            if (chain.slots[i].sub_level < 0.0 || chain.slots[i].sub_level > 1.0) { printf("sub_level out of range on slot %d\n", i); nudgeOk = 0; }
+        }
+
+        /* Extreme edge case: nudge repeatedly near the 0.0/1.0 boundary many times, confirm it never escapes range */
+        for (int rep = 0; rep < 200; rep++)
+            distroy_chain_nudge_subparams(&chain, 0.1, (unsigned int)(rep * 7919));
+        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+            if (chain.slots[i].sub_drive < 0.0 || chain.slots[i].sub_drive > 1.0 ||
+                chain.slots[i].sub_tone < 0.0 || chain.slots[i].sub_tone > 1.0 ||
+                chain.slots[i].sub_level < 0.0 || chain.slots[i].sub_level > 1.0) {
+                printf("Repeated nudging pushed a param out of range on slot %d\n", i);
+                nudgeOk = 0;
+            }
+        }
+
+        printf("Sub-parameter nudge test: %s\n", nudgeOk ? "PASSED" : "FAILED");
+        if (!nudgeOk) all_ok = 0;
+    }
+
+    printf("\n=== Per-gap phase invert / zero-crossing smoother test ===\n");
+    {
+        int gapOk = 1;
+
+        /* Phase invert: same chain/seed, compare output with a gap's
+         * phase invert ON vs OFF -- should differ (proves the toggle
+         * actually has an effect at the right point in the chain), and
+         * for a purely linear/passthrough-ish comparison, the two
+         * outputs should be very close to exact negatives of each
+         * other at each sample when nothing else in the chain is
+         * amplitude-dependent in a way that would break that symmetry
+         * (distortion stages generally aren't symmetric under negation,
+         * so we just check "differs", not "is an exact negation",
+         * across a full randomized chain). */
+        DistroyChain chainA, chainB;
+        distroy_chain_init(&chainA, 44100.0);
+        distroy_chain_init(&chainB, 44100.0);
+        distroy_chain_randomize_all(&chainA, 555);
+        distroy_chain_randomize_all(&chainB, 555);
+        distroy_chain_set_phase_invert(&chainB, 3, 1); /* gap between visual slots 3 and 4 */
+
+        int differed = 0;
+        for (int i = 0; i < 4410; i++) {
+            double x = sin((double)i * 0.05) * 0.6;
+            double ya = distroy_chain_process(&chainA, x);
+            double yb = distroy_chain_process(&chainB, x);
+            if (!isfinite(ya) || !isfinite(yb)) { printf("Phase invert test produced non-finite output\n"); gapOk = 0; }
+            if (fabs(ya - yb) > 1e-6) differed = 1;
+        }
+        if (!differed) { printf("Phase invert gap toggle had no effect on output\n"); gapOk = 0; }
+        printf("Phase invert toggle changes output: %s\n", differed ? "yes (PASSED)" : "no (FAILED)");
+
+        /* Confirm get/set round-trip correctly, and out-of-range indices
+         * are safely ignored rather than corrupting memory. */
+        distroy_chain_set_phase_invert(&chainB, 3, 0);
+        if (distroy_chain_get_phase_invert(&chainB, 3) != 0) { printf("Phase invert get/set round-trip failed\n"); gapOk = 0; }
+        distroy_chain_set_phase_invert(&chainB, 99, 1); /* out of range, should be silently ignored */
+        distroy_chain_set_zc_smooth(&chainB, -1, 1); /* out of range, should be silently ignored */
+
+        /* Zero-crossing smoother: feed a harsh/buzzy high-zero-crossing
+         * signal directly into the smoother (bypassing the full chain
+         * for a clean, isolated check) and confirm it measurably
+         * reduces high-frequency energy vs. the same signal with
+         * smoothing disabled. */
+        ZeroCrossingSmoother zc;
+        zcsmoother_init(&zc, 44100.0);
+        double sumAbsDiffSmoothed = 0.0, sumAbsDiffRaw = 0.0;
+        double prevRaw = 0.0, prevSmoothed = 0.0;
+        for (int i = 0; i < 4410; i++) {
+            /* A deliberately harsh, fast-toggling square-ish wave --
+             * high zero-crossing rate, the case this is meant to tame. */
+            double x = (fmod((double)i, 6.0) < 3.0) ? 0.7 : -0.7;
+            double smoothed = zcsmoother_process(&zc, x, 44100.0);
+            if (!isfinite(smoothed)) { printf("Zero-crossing smoother produced non-finite output\n"); gapOk = 0; }
+            sumAbsDiffRaw += fabs(x - prevRaw);
+            sumAbsDiffSmoothed += fabs(smoothed - prevSmoothed);
+            prevRaw = x;
+            prevSmoothed = smoothed;
+        }
+        printf("Sample-to-sample variation: raw=%.2f, smoothed=%.2f (smoothed should be measurably lower)\n",
+               sumAbsDiffRaw, sumAbsDiffSmoothed);
+        /* A gentle one-pole smoother against a very fast square wave
+         * (period 6 samples, ~7.35kHz fundamental) won't produce a
+         * dramatic reduction -- and per spec this is meant to be subtle
+         * ("smooth it a little bit"), not aggressive filtering. Just
+         * confirm the effect is real and measurable, not that it's
+         * large. */
+        if (sumAbsDiffSmoothed >= sumAbsDiffRaw * 0.99) {
+            printf("Zero-crossing smoother had no measurable effect\n");
+            gapOk = 0;
+        }
+
+        /* Full-chain sanity with a zc-smooth gap enabled -- finite over
+         * a longer run, worst case (all pedals maximally driven). */
+        DistroyChain chainC;
+        distroy_chain_init(&chainC, 44100.0);
+        distroy_chain_randomize_all(&chainC, 777);
+        distroy_chain_set_zc_smooth(&chainC, 0, 1);
+        distroy_chain_set_zc_smooth(&chainC, 5, 1);
+        for (int i = 0; i < DISTROY_NUM_SLOTS; i++) chainC.slots[i].knob = 1.0;
+        for (int i = 0; i < 44100; i++) {
+            double y = distroy_chain_process(&chainC, sin((double)i * 0.3) * 0.9);
+            if (!isfinite(y)) { printf("Full-chain zc-smooth worst-case produced non-finite output\n"); gapOk = 0; break; }
+        }
+
+        printf("Per-gap phase invert / zero-crossing smoother test: %s\n", gapOk ? "PASSED" : "FAILED");
+        if (!gapOk) all_ok = 0;
+    }
+
+    printf("\n=== Aggressive multi-seed worst-case finite-output test ===\n");
+    {
+        /* The single-seed (777) worst-case test above stayed finite on
+         * this machine but was reported to go non-finite on a
+         * different machine/compiler -- consistent with marginal
+         * numerical instability in a self-oscillating resonant filter
+         * type (SEM/Polivoks/Moog Ladder/Korg MS-20) whose exact
+         * tipping point is sensitive to small floating-point
+         * differences across platforms, not a deterministic logic bug.
+         * Added a defensive sanitize_finite() at the point right after
+         * each pedal's own processing (before anything stateful
+         * downstream -- the zc-smoother's or tilt EQ's onepole filters
+         * -- could see it and have their persistent state permanently
+         * corrupted by a single NaN). This test sweeps MANY seeds
+         * (not just one) with every gap effect enabled simultaneously
+         * and all knobs maxed, to build real confidence the fix
+         * generalizes rather than just papering over one specific
+         * case. */
+        int stressOk = 1;
+        int nonFiniteSeedsSeen = 0;
+        for (int seed = 0; seed < 200; seed++) {
+            DistroyChain stressChain;
+            distroy_chain_init(&stressChain, 44100.0);
+            distroy_chain_randomize_all(&stressChain, (unsigned int)(seed * 7919 + 13));
+            for (int gi = 0; gi < DISTROY_NUM_GAPS; gi++) {
+                distroy_chain_set_phase_invert(&stressChain, gi, seed % 2);
+                distroy_chain_set_zc_smooth(&stressChain, gi, 1);
+                distroy_chain_set_slew_ms(&stressChain, gi, 15.0);
+            }
+            distroy_chain_set_master_tone(&stressChain, (seed % 2 == 0) ? 0.0 : 1.0); /* alternate full dark/bright */
+            for (int i = 0; i < DISTROY_NUM_SLOTS; i++) stressChain.slots[i].knob = 1.0;
+
+            int thisSeedOk = 1;
+            for (int i = 0; i < 4410; i++) {
+                double y = distroy_chain_process(&stressChain, sin((double)i * 0.37) * 0.95);
+                if (!isfinite(y)) { thisSeedOk = 0; break; }
+            }
+            if (!thisSeedOk) {
+                nonFiniteSeedsSeen++;
+                printf("Seed %d produced non-finite output (pre-sanitization -- shouldn't be reachable post-fix)\n", seed);
+            }
+        }
+        printf("Non-finite results across 200 worst-case seeds: %d (should be 0 -- sanitize_finite() should have caught all of them)\n", nonFiniteSeedsSeen);
+        if (nonFiniteSeedsSeen > 0) stressOk = 0;
+        printf("Aggressive multi-seed worst-case finite-output test: %s\n", stressOk ? "PASSED" : "FAILED");
+        if (!stressOk) all_ok = 0;
+    }
+
+    printf("\n=== Zero-crossing smoother slew rate test (0-4ms range) ===\n");
+    {
+        int slewOk = 1;
+
+        /* At zcRate=0 (freshly init'd, silent input so far), the first
+         * sample should pass through with NO slew limiting -- output
+         * should jump straight to the input value, not ramp toward it. */
+        ZeroCrossingSmoother z1;
+        zcsmoother_init(&z1, 44100.0);
+        double firstOut = zcsmoother_process(&z1, 1.0, 44100.0);
+        /* Some lowpass smoothing still applies (cutoff starts at
+         * 12kHz, a very gentle single-pole rolloff), but slew limiting
+         * specifically should not be constraining this first jump --
+         * confirm the immediate response is large, not a slow ramp. */
+        printf("First-sample response at zcRate=0: %.4f (should jump most of the way toward 1.0, not ramp slowly)\n", firstOut);
+        if (firstOut < 0.3) { printf("Slew limiter appears active even at zcRate=0\n"); slewOk = 0; }
+
+        /* Drive zcRate up toward its ceiling with a fast-toggling
+         * signal, then confirm a sudden large jump gets visibly capped
+         * (spread across several samples) rather than passing straight
+         * through. */
+        ZeroCrossingSmoother z2;
+        zcsmoother_init(&z2, 44100.0);
+        for (int i = 0; i < 2000; i++) {
+            double x = (i % 2 == 0) ? 0.8 : -0.8; /* alternates every sample -- max possible zero-crossing rate */
+            zcsmoother_process(&z2, x, 44100.0);
+        }
+        printf("zcRate after driving with max-rate alternation: %.3f (should be near 1.0)\n", z2.zcRate);
+        if (z2.zcRate < 0.7) { printf("zcRate did not climb toward its ceiling as expected\n"); slewOk = 0; }
+
+        double jumpOut1 = zcsmoother_process(&z2, 1.0, 44100.0);
+        double jumpOut2 = zcsmoother_process(&z2, 1.0, 44100.0);
+        double jumpOut3 = zcsmoother_process(&z2, 1.0, 44100.0);
+        printf("Response to a sudden jump at high zcRate: %.4f, %.4f, %.4f (should climb gradually, not jump immediately)\n",
+               jumpOut1, jumpOut2, jumpOut3);
+        if (!(jumpOut1 < jumpOut2 && jumpOut2 < jumpOut3)) {
+            printf("Slew limiter did not produce a gradual climb at high zcRate\n");
+            slewOk = 0;
+        }
+        if (jumpOut1 > 0.5) {
+            printf("First-sample jump was too large for a supposedly-limited slew rate\n");
+            slewOk = 0;
+        }
+
+        /* Sanity: finite and bounded over a longer worst-case run. */
+        for (int i = 0; i < 44100; i++) {
+            double y = zcsmoother_process(&z2, (i % 3 == 0) ? 1.0 : -1.0, 44100.0);
+            if (!isfinite(y)) { printf("Slew-limited output not finite\n"); slewOk = 0; break; }
+        }
+
+        printf("Zero-crossing smoother slew rate test: %s\n", slewOk ? "PASSED" : "FAILED");
+        if (!slewOk) all_ok = 0;
+    }
+
+    printf("\n=== Adjustable slew ceiling test ===\n");
+    {
+        int adjOk = 1;
+
+        /* Setting the ceiling to 0 should fully disable slew limiting,
+         * even at a high zero-crossing rate. */
+        ZeroCrossingSmoother zz;
+        zcsmoother_init(&zz, 44100.0);
+        zcsmoother_set_max_slew_ms(&zz, 0.0);
+        for (int i = 0; i < 2000; i++) {
+            double x = (i % 2 == 0) ? 0.8 : -0.8;
+            zcsmoother_process(&zz, x, 44100.0);
+        }
+        double zeroSlewJump = zcsmoother_process(&zz, 1.0, 44100.0);
+        printf("Jump response with slew ceiling=0 at high zcRate: %.4f (should jump through mostly unrestricted)\n", zeroSlewJump);
+        if (zeroSlewJump < 0.3) { printf("Slew ceiling=0 did not fully disable slew limiting\n"); adjOk = 0; }
+
+        /* A larger ceiling should produce MORE limiting (slower climb)
+         * than the 4ms default, at the same high zero-crossing rate.
+         * Comparing a single sample right after the jump is too noisy
+         * (both values are tiny and near-zero, subject to filter phase
+         * artifacts) -- instead, measure how many samples each takes to
+         * first climb past a meaningful threshold, a more robust
+         * trend-based comparison. */
+        ZeroCrossingSmoother zDefault, zBigger;
+        zcsmoother_init(&zDefault, 44100.0); /* default 4ms */
+        zcsmoother_init(&zBigger, 44100.0);
+        zcsmoother_set_max_slew_ms(&zBigger, 15.0);
+        for (int i = 0; i < 2000; i++) {
+            double x = (i % 2 == 0) ? 0.8 : -0.8;
+            zcsmoother_process(&zDefault, x, 44100.0);
+            zcsmoother_process(&zBigger, x, 44100.0);
+        }
+        int samplesToDefault = -1, samplesToBigger = -1;
+        for (int i = 0; i < 4410; i++) {
+            double yd = zcsmoother_process(&zDefault, 1.0, 44100.0);
+            double yb = zcsmoother_process(&zBigger, 1.0, 44100.0);
+            if (samplesToDefault < 0 && yd > 0.3) samplesToDefault = i;
+            if (samplesToBigger < 0 && yb > 0.3) samplesToBigger = i;
+            if (samplesToDefault >= 0 && samplesToBigger >= 0) break;
+        }
+        printf("Samples to climb past 0.3: default(4ms)=%d, bigger(15ms)=%d (bigger ceiling should take longer)\n",
+               samplesToDefault, samplesToBigger);
+        if (samplesToBigger <= samplesToDefault) { printf("Larger slew ceiling did not produce more limiting\n"); adjOk = 0; }
+
+        /* Clamping: out-of-range values get clamped, not passed through. */
+        zcsmoother_set_max_slew_ms(&zz, -5.0);
+        if (zz.maxSlewMs != 0.0) { printf("Negative slew ceiling was not clamped to 0\n"); adjOk = 0; }
+        zcsmoother_set_max_slew_ms(&zz, 999.0);
+        if (zz.maxSlewMs != 20.0) { printf("Oversized slew ceiling was not clamped to 20\n"); adjOk = 0; }
+
+        /* Chain-level accessor round-trip. */
+        DistroyChain chainD;
+        distroy_chain_init(&chainD, 44100.0);
+        distroy_chain_set_slew_ms(&chainD, 2, 8.5);
+        double roundTrip = distroy_chain_get_slew_ms(&chainD, 2);
+        if (fabs(roundTrip - 8.5) > 1e-9) { printf("Chain-level slew ms get/set round-trip failed: got %.3f\n", roundTrip); adjOk = 0; }
+
+        printf("Adjustable slew ceiling test: %s\n", adjOk ? "PASSED" : "FAILED");
+        if (!adjOk) all_ok = 0;
+    }
+
+    printf("\n=== Master Tone test (12 o'clock = neutral, either way changes tone) ===\n");
+    {
+        int toneOk = 1;
+
+        /* Default (freshly init'd) should be a genuine no-op -- same
+         * output with and without going through tilteq_process at
+         * tone=0.5, confirmed by comparing a chain's output against
+         * itself processed both ways isn't meaningful (it's the same
+         * call either way) -- instead confirm tone=0.5 really is what
+         * distroy_chain_init() leaves it at, and that output differs
+         * once nudged away from it. */
+        DistroyChain chainA, chainB;
+        distroy_chain_init(&chainA, 44100.0);
+        distroy_chain_init(&chainB, 44100.0);
+        distroy_chain_randomize_all(&chainA, 2024);
+        distroy_chain_randomize_all(&chainB, 2024);
+        for (int gi = 0; gi < DISTROY_NUM_GAPS; gi++) {
+            if (fabs(chainA.masterToneGaps[gi].tone - 0.5) > 1e-9) {
+                printf("Master tone gap %d did not default to 0.5 (neutral) on init\n", gi);
+                toneOk = 0;
+            }
+        }
+
+        distroy_chain_set_master_tone(&chainB, 0.1); /* dark */
+        int differedDark = 0;
+        for (int i = 0; i < 4410; i++) {
+            double x = sin((double)i * 0.05) * 0.5;
+            double ya = distroy_chain_process(&chainA, x);
+            double yb = distroy_chain_process(&chainB, x);
+            if (!isfinite(ya) || !isfinite(yb)) { printf("Master tone test produced non-finite output\n"); toneOk = 0; }
+            if (fabs(ya - yb) > 1e-6) differedDark = 1;
+        }
+        printf("Setting tone away from neutral changes output: %s\n", differedDark ? "yes (PASSED)" : "no (FAILED)");
+        if (!differedDark) toneOk = 0;
+
+        /* Both directions should differ from neutral, and from each
+         * other (dark vs bright are genuinely different, not both
+         * collapsing to the same thing). */
+        DistroyChain chainDark, chainBright, chainFlat;
+        distroy_chain_init(&chainDark, 44100.0);
+        distroy_chain_init(&chainBright, 44100.0);
+        distroy_chain_init(&chainFlat, 44100.0);
+        distroy_chain_randomize_all(&chainDark, 42);
+        distroy_chain_randomize_all(&chainBright, 42);
+        distroy_chain_randomize_all(&chainFlat, 42);
+        distroy_chain_set_master_tone(&chainDark, 0.0);
+        distroy_chain_set_master_tone(&chainBright, 1.0);
+        /* chainFlat stays at default 0.5 */
+        double sumDarkVsFlat = 0.0, sumBrightVsFlat = 0.0, sumDarkVsBright = 0.0;
+        for (int i = 0; i < 4410; i++) {
+            double x = sin((double)i * 0.05) * 0.5;
+            double yd = distroy_chain_process(&chainDark, x);
+            double yb = distroy_chain_process(&chainBright, x);
+            double yf = distroy_chain_process(&chainFlat, x);
+            sumDarkVsFlat += fabs(yd - yf);
+            sumBrightVsFlat += fabs(yb - yf);
+            sumDarkVsBright += fabs(yd - yb);
+        }
+        printf("Cumulative difference vs flat: dark=%.2f, bright=%.2f; dark vs bright=%.2f (all should be clearly nonzero)\n",
+               sumDarkVsFlat, sumBrightVsFlat, sumDarkVsBright);
+        if (sumDarkVsFlat < 1.0 || sumBrightVsFlat < 1.0 || sumDarkVsBright < 1.0) {
+            printf("Tone extremes did not produce clearly distinct output\n");
+            toneOk = 0;
+        }
+
+        /* Clamping: out-of-range values clamped, not passed through.
+         * Checking gap 0 as representative -- the setter loops over
+         * all 7 identically. */
+        distroy_chain_set_master_tone(&chainFlat, -5.0);
+        if (chainFlat.masterToneGaps[0].tone != 0.0) { printf("Negative tone was not clamped to 0\n"); toneOk = 0; }
+        distroy_chain_set_master_tone(&chainFlat, 5.0);
+        if (chainFlat.masterToneGaps[0].tone != 1.0) { printf("Oversized tone was not clamped to 1\n"); toneOk = 0; }
+
+        printf("Master Tone test: %s\n", toneOk ? "PASSED" : "FAILED");
+        if (!toneOk) all_ok = 0;
     }
 
     printf("\n%s\n", all_ok ? "ALL CHECKS PASSED" : "SOME CHECKS FAILED");

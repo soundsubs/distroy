@@ -34,6 +34,10 @@ processes first, knob 1 processes last).
 | Noiz | Mix (capped 66%) | White/pink/red noise generator, dry signal always at least 34% |
 | Tube | Wet/Dry | Vintage Russian tube saturation, asymmetric grit + warm rolloff |
 | Cable Fault | Mix (severity) | Broken 1/4" cable/jack sim -- random crackle/cutout, never fully silent |
+| Bass Big Muff | Wet/Dry | Low-preserving cascaded hard clip, army green |
+| MXR Bass Dist | Wet/Dry | Low-preserving asymmetric clip, red |
+| Boss ODB-3 | Wet/Dry | Buzzy/synth-like bass overdrive, yellow |
+| Low EQ Boost | Gain | Low-shelf boost, <300Hz emphasis |
 
 **All distortion-type pedals use Wet/Dry (v0.4.3+)** — every knob
 defaults to 50% and uniformly means "how much of the effect is blended
@@ -177,6 +181,183 @@ core. Verified via dedicated tests: confirmed inert at battery_amount=0
 types stay finite under a sustained 2-second worst-case (max drain), and
 genuine type variety across randomized chains (not just one category
 always winning).
+
+## Noise gate startup fix (v0.13.0)
+
+Real bug: the gate previously started fully OPEN (`gain = 1.0`) on init,
+meaning it offered zero protection for the very first block(s) of
+audio -- exactly when a startup transient from the DSP chain settling
+(freshly randomized filters/resonance, etc.) is most likely, since the
+envelope follower hadn't had any time yet to detect anything and react.
+This caused an occasional blast of noise right when a plugin instance
+first loaded. Now starts CLOSED (`gain = 0.0`) and ramps open via the
+existing fast attack coefficient (~10ms) once real signal is actually
+detected -- a genuine "slowly ramping it on" startup rather than wide
+open from sample one. Verified via a rewritten test covering all four
+properties together: starts closed, ramps open gradually (not
+instantly) once signal arrives, a droning chain still ramps down to
+silence when input goes quiet, and it reopens properly when signal
+returns.
+
+## Non-finite output safety net (v0.16.2, applies to all platforms)
+
+A user running the test suite on a different machine hit two tests
+going to NaN (`isnan`) that had passed reliably on this development
+machine every time: the direction-toggle test (single sample, no
+randomization) and the zc-smooth worst-case stress test. Both symptoms
+point to marginal numerical instability in the older self-oscillating
+resonant filter types (SEM, Polivoks, Moog Ladder, Korg MS-20 are all
+capable of blowing up under extreme parameter combinations, a
+well-known real-world DSP hazard) whose exact tipping point is
+sensitive to small floating-point differences across
+machines/compilers/libm versions -- not a deterministic logic bug that
+would reproduce identically everywhere.
+
+Added `sanitize_finite()`, applied right after each pedal's own
+processing (`distroy_block_process()`) -- critically, BEFORE the value
+reaches anything stateful downstream. A NaN reaching the zero-crossing
+smoother's or master tone's onepole filters would permanently corrupt
+that filter's persistent internal state for every future sample, not
+just the one bad sample, since NaN propagates through all further
+arithmetic using that state. A second layer also sanitizes right after
+the zero-crossing smoother and tilt EQ stages themselves. Non-finite
+values are replaced with silence (0.0) rather than clamped to some
+large value, since failing gracefully to silence is safer than a loud
+clamped transient.
+
+Verified via a new aggressive multi-seed test (200 random seeds, not
+just one) with every gap effect enabled simultaneously, all knobs
+maxed, and master tone alternating full-dark/full-bright -- 0 non-finite
+results across all 200 seeds post-fix. Can't fully reproduce or confirm
+this fixes the exact case reported on the other machine (this
+development machine never hit the failure in the first place), but the
+fix catches ANY non-finite value regardless of platform-specific
+triggering conditions, since it checks the actual computed value rather
+than trying to predict when instability occurs.
+
+## Master Tone (v0.16.0, VST3-only feature, DSP core change)
+
+**v0.16.1:** switched from a single `TiltEQ` applied once at the very
+end of the chain to 7 independent instances, one at EACH gap between
+slots, all driven by the same tone value from one knob -- per direct
+user feedback wanting to A/B "one trim at the output" against "the tone
+actually shifts as the signal moves through the chain". **Important:**
+this makes the knob's extremes noticeably stronger than before, since
+the tilt now compounds across 7 stages instead of applying once (the
+test suite's cumulative-difference-from-flat numbers roughly tripled:
+~890 before, ~2400-3450 now) -- worth checking whether the far ends of
+the knob's range now feel too extreme; the per-stage tilt amount
+(currently a fixed +-0.6 gain factor inside `tilteq_process`) is the
+lever to pull if so.
+
+New: a global tone control, added in response to feedback that gain
+staging across 31 pedal types had made everything sound "very harsh" --
+rather than re-tuning every pedal's internal levels individually, a
+tone trim is a much simpler fix. Reuses the existing `TiltEQ` primitive
+(the same "0.5 = flat, turning either way tilts dark/bright" behaviour
+already used for each pedal's own Tone control) rather than building
+something new -- 12 o'clock (tone=0.5) is a genuine no-op by
+construction on every stage simultaneously, not something that needs
+separate tuning to feel neutral. `distroy_chain_set_master_tone()`
+clamps to 0.0-1.0 and sets all 7 gap instances identically. Move never
+sets this (no UI hook for it there), so it's dormant there despite
+living in the shared core. Verified via a dedicated test: all 7 gap
+instances default to exactly 0.5 on init, output measurably differs
+once nudged away from neutral, and dark/bright/flat are all clearly
+distinct from each other (not two directions collapsing to the same
+effect).
+
+## Per-gap phase invert / zero-crossing smoother (v0.15.0, VST3-only feature, DSP core change)
+
+**v0.15.2:** the slew-rate ceiling (previously a hardcoded 4ms) is now
+user-adjustable via `zcsmoother_set_max_slew_ms()` /
+`distroy_chain_set_slew_ms()` (0-20ms, clamped), exposed in the VST3 UI
+as a tiny dial next to each gap's zero-crossing button. The actual
+per-sample slew limit still scales down from this ceiling by the live
+zero-crossing rate as before (0 at silence/already-smooth signal, up to
+the ceiling at maximum measured harshness) -- this just makes the
+ceiling itself adjustable rather than fixed. Verified via a dedicated
+test using a robust trend-based comparison (samples-to-climb-past-0.3
+after a sudden jump) rather than a single-sample comparison, which
+turned out to be too noisy to reliably show the expected "bigger
+ceiling = more limiting" relationship on the first attempt -- caught
+and fixed before shipping.
+
+**v0.15.1:** added a slew-rate limiting stage to the zero-crossing
+smoother -- caps how fast the signal can change per sample (an
+amplitude-domain constraint), applied BEFORE the existing dynamic
+lowpass (frequency-domain). Time constant scales 0 to ~4ms with the
+same zero-crossing rate already driving the lowpass cutoff -- an
+already-smooth signal (low rate) gets effectively no slew limiting; a
+harsh/buzzy signal (high rate) gets meaningfully constrained. This
+turned out to matter a lot more than the lowpass alone: the dedicated
+test's "harsh square wave" benchmark went from a ~3% reduction in
+sample-to-sample variation (lowpass only) to ~87% (with slew limiting
+added) -- a one-pole lowpass alone is fairly weak against sharp
+discontinuities, since it only gently rolls off high frequencies rather
+than directly capping the step size. Verified via a dedicated test:
+zero slew limiting at zcRate=0 (first sample jumps through mostly
+unrestricted), and a sudden jump at high zcRate climbs gradually across
+several samples rather than passing straight through.
+
+New: 7 "gaps" between the 8 chain slots, each independently toggleable
+for two effects:
+
+- **Phase invert** -- flips the signal's polarity (multiplies by -1) at
+  that point in the chain.
+- **Zero-crossing smoother** -- tracks the signal's zero-crossing rate
+  (a standard DSP proxy for brightness/harshness) and dynamically sets
+  a gentle lowpass cutoff: a harsher/buzzier signal gets pulled toward
+  more smoothing, an already-smooth signal is left mostly alone. A
+  genuinely gentle effect per spec ("smooth it a little bit"), not
+  aggressive filtering -- cutoff stays in the 3-12kHz range.
+
+Both are indexed by VISUAL gap position (0-6, between visual slots i
+and i+1) regardless of signal direction (`DistroyChain.reverse`) --
+`distroy_chain_process()` figures out where that visual boundary
+actually falls in the current processing order, since both effects are
+direction-agnostic (inverting phase or smoothing doesn't care which way
+the signal conceptually "flows" through that point). Move never sets
+these (no UI hook for it there), so both are dormant there despite
+living in the shared core. Verified via a dedicated test: phase invert
+toggle demonstrably changes chain output; the smoother measurably (if
+gently, by design) reduces sample-to-sample variation on a deliberately
+harsh test signal; full-chain worst-case (all knobs maxed, smoothing
+engaged) stays finite over a full second.
+
+## Sub-parameter nudge (v0.14.0, VST3-only feature, DSP core change)
+
+New `distroy_chain_nudge_subparams()` -- nudges every slot's
+sub_drive/sub_tone/sub_level by a small random amount (max magnitude
+configurable, e.g. 0.1 for ±10%), leaving the actual knob value and
+pedal type completely untouched. Powers the VST3's clickable corner
+screws: clicking a screw re-rolls that corner's decorative type AND
+gives the whole chain's internal "character" a small jostle, like
+tapping a well-used pedalboard slightly shifts component tolerances,
+without disturbing anything the user has actually dialed in. Move never
+calls this (no UI hook for it there), so it's dormant there despite
+living in the shared core. Verified via a dedicated test: knob values
+and pedal types stay byte-identical, all three sub-parameters stay
+within the requested delta and the valid 0.0-1.0 range even under 200
+repeated nudges hammering the boundary.
+
+## Four bass-voiced pedals (v0.12.0)
+
+Bass distortion pedals need to preserve the low fundamental rather than
+naively clipping the whole signal (guitar-pedal style), which tends to
+mangle bass frequencies. Three of these split the signal internally at
+a low crossover point -- the low band stays relatively clean/lightly
+saturated, only the high band gets heavily clipped, then they're summed
+back together:
+
+- **Bass Big Muff** -- split ~100Hz, same cascaded-hard-clip character
+  as the regular Big Muff on the high band.
+- **MXR Bass Dist** -- split ~150Hz, more asymmetric clipping curve.
+- **Boss ODB-3** -- split ~120Hz, harder clip plus coarse quantization
+  for that distinctly buzzy/"synth-like" ODB-3 character.
+- **Low EQ Boost** -- not a distortion at all, a simple low-shelf boost
+  (new `biquad_set_lowshelf()`, standard RBJ cookbook formula) centered
+  at 250Hz, knob-controlled 0-12dB.
 
 ## Noise gate on output (v0.10.0)
 

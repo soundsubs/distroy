@@ -69,6 +69,10 @@ typedef enum {
     DISTROY_SEM,           /* Oberheim SEM-style state-variable filter, controlled high resonance */
     DISTROY_POLIVOKS,      /* Polivoks-style growly, heavily distorted resonant filter */
     DISTROY_OCTAVE,        /* Fulltone Octafuzz-style octave pedal, up or down (random per load) */
+    DISTROY_BASS_MUFF,     /* Bass Big Muff -- low-preserving cascaded hard clip for bass */
+    DISTROY_MXR_BASS,      /* MXR Bass Distortion -- asymmetric clip with a preserved clean sub-band */
+    DISTROY_BOSS_ODB3,     /* Boss ODB-3 -- buzzy/synth-like bass overdrive */
+    DISTROY_BASS_EQ,       /* Simple low-shelf EQ boost, <300Hz emphasis */
     DISTROY_TYPE_COUNT
 } DistroyType;
 
@@ -101,6 +105,40 @@ void onepole_set_lowpass(OnePole *f, double cutoff_hz, double sample_rate);
 void onepole_set_highpass(OnePole *f, double cutoff_hz, double sample_rate);
 double onepole_process(OnePole *f, double x);
 
+/* Per-gap "zero crossing detector" smoother -- one of the 7 clickable
+ * gap buttons between the 8 chain slots (VST3-only feature). Tracks
+ * the incoming signal's zero-crossing rate (a standard DSP proxy for
+ * brightness/harshness -- a buzzier, more harmonic-rich signal crosses
+ * zero more often per unit time than a smooth one) and uses that to
+ * drive TWO complementary smoothing stages, both scaled by the same
+ * rate estimate (harsher signal = more of both, already-smooth signal
+ * = mostly untouched):
+ *   1. Slew-rate limiting (amplitude-domain) -- caps how fast the
+ *      signal is allowed to change per sample, 0 to maxSlewMs
+ *      full-swing time constant (maxSlewMs is user-adjustable via a
+ *      small dial in the VST3 UI, see zcsmoother_set_max_slew_ms() --
+ *      defaults to 4.0ms). Applied FIRST, catching fast transients
+ *      directly rather than only in the frequency domain.
+ *   2. A gentle dynamic lowpass (frequency-domain), as before.
+ * Genuinely named for what it does, not just a generic smoother with a
+ * fancy label. */
+typedef struct {
+    double prevSample;
+    double zcRate;        /* smoothed 0.0-1.0 zero-crossing rate estimate */
+    double slewedSample;  /* slew limiter's own running output state */
+    double maxSlewMs;      /* user-adjustable slew ceiling, ms (default 4.0) */
+    OnePole smoothFilter;
+} ZeroCrossingSmoother;
+
+void zcsmoother_init(ZeroCrossingSmoother *z, double sample_rate);
+double zcsmoother_process(ZeroCrossingSmoother *z, double x, double sample_rate);
+/* Sets the slew ceiling (maxSlewMs above) -- the actual per-sample slew
+ * limit still scales down from this ceiling by the live zero-crossing
+ * rate (0 at silence/already-smooth signal, up to this ceiling at
+ * maximum measured harshness), it's not a fixed constant amount.
+ * Clamped to a sane 0-20ms range. */
+void zcsmoother_set_max_slew_ms(ZeroCrossingSmoother *z, double maxMs);
+
 /* Biquad filter state (used for peaking/notch coloration -- Tubescreamer
  * mid hump, Metal Zone scoop). RBJ cookbook coefficients. */
 typedef struct {
@@ -109,6 +147,10 @@ typedef struct {
 } Biquad;
 
 void biquad_set_peaking(Biquad *f, double freq_hz, double q, double gain_db, double sample_rate);
+/* Standard RBJ Audio EQ Cookbook low-shelf, shelf slope S=1.0 (the
+ * usual default -- a gentle, musical shelf transition). Used by
+ * DISTROY_BASS_EQ. */
+void biquad_set_lowshelf(Biquad *f, double freq_hz, double gain_db, double sample_rate);
 /* Constant-skirt-gain bandpass (RBJ cookbook) -- used by the auto-wah
  * types, recomputed per-sample as the envelope follower sweeps the
  * center frequency (same "retune every call" pattern as Rat's
@@ -497,6 +539,7 @@ double distroy_block_get_envelope_level(const DistroyBlock *b);
  * never changes (knob 1 is always slot 0); only which slot's effect
  * gets applied to the signal FIRST changes with direction. */
 #define DISTROY_NUM_SLOTS 8
+#define DISTROY_NUM_GAPS (DISTROY_NUM_SLOTS - 1) /* 7 -- one between each pair of adjacent slots */
 
 typedef struct {
     DistroyBlock slots[DISTROY_NUM_SLOTS];
@@ -507,6 +550,28 @@ typedef struct {
                                there. Synced into each slot's own
                                battery_amount field at the start of
                                distroy_chain_process(). */
+    /* Per-gap toggles (VST3-only feature -- Move never sets these, so
+     * both are always inert there). gap[i] sits between VISUAL slots i
+     * and i+1 regardless of processing direction (`reverse` above) --
+     * distroy_chain_process() figures out where that boundary actually
+     * falls in the current processing order, since phase inversion and
+     * smoothing are direction-agnostic operations. */
+    int phaseInvertGap[DISTROY_NUM_GAPS];
+    int zcSmoothGap[DISTROY_NUM_GAPS];
+    ZeroCrossingSmoother zcSmoothers[DISTROY_NUM_GAPS];
+    /* Master Tone -- v0.16.1: switched from a single TiltEQ applied
+     * once at the very end of the chain to 7 independent instances, one
+     * at EACH gap between slots, all driven by the same tone value (one
+     * knob, distributed effect) -- per direct user feedback wanting to
+     * compare "one trim at the output" against "the tone actually
+     * shifts as the signal moves through the chain". Reuses the
+     * existing TiltEQ primitive (same "0.5 = flat, turning either way
+     * tilts dark/bright" behaviour already used for each pedal's own
+     * Tone control) rather than building something new -- a knob at 12
+     * o'clock (tone=0.5) is a genuine no-op on every stage
+     * simultaneously, matching the "default to 12 o'clock which is no
+     * change" spec exactly regardless of which design is active. */
+    TiltEQ masterToneGaps[DISTROY_NUM_GAPS];
 } DistroyChain;
 
 void distroy_chain_init(DistroyChain *c, double sample_rate);
@@ -521,7 +586,31 @@ void distroy_chain_randomize(DistroyChain *c, unsigned int seed);
  * sub-params), both on instantiation and on-demand via the RANDOMIZE
  * menu action. */
 void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed);
+/* Nudges every slot's sub_drive/sub_tone/sub_level by a small random
+ * amount (amount01 = max magnitude, e.g. 0.1 for +-10%), leaving the
+ * actual knob value and pedal type untouched. See distroy_dsp.c for
+ * the full design rationale (VST3 clickable corner screws). */
+void distroy_chain_nudge_subparams(DistroyChain *c, double amount01, unsigned int seed);
 double distroy_chain_process(DistroyChain *c, double x);
+
+/* Per-gap controls (VST3-only feature, gapIndex 0-6, gap i sits between
+ * visual slots i and i+1). Setting doesn't reset the smoother's
+ * internal state, so toggling on/off repeatedly doesn't click. */
+void distroy_chain_set_phase_invert(DistroyChain *c, int gapIndex, int enabled);
+void distroy_chain_set_zc_smooth(DistroyChain *c, int gapIndex, int enabled);
+int distroy_chain_get_phase_invert(const DistroyChain *c, int gapIndex);
+int distroy_chain_get_zc_smooth(const DistroyChain *c, int gapIndex);
+/* User-adjustable slew ceiling for the zero-crossing smoother's slew
+ * limiter stage (ms, 0-20 sane range, default 4.0) -- see
+ * zcsmoother_set_max_slew_ms() for the full explanation. */
+void distroy_chain_set_slew_ms(DistroyChain *c, int gapIndex, double maxMs);
+double distroy_chain_get_slew_ms(const DistroyChain *c, int gapIndex);
+/* Master Tone -- 0.0-1.0, 0.5 = flat/no change (12 o'clock), lower =
+ * dark (bass-boost/treble-cut), higher = bright (opposite). Sets ALL 7
+ * gap tilt stages to the same value (one knob, distributed effect) --
+ * see DistroyChain's masterToneGaps field comment for the full
+ * rationale. */
+void distroy_chain_set_master_tone(DistroyChain *c, double tone01);
 
 /* Mode label for display, e.g. "GAIN" or "MIX". */
 const char* distroy_knob_mode_label(DistroyKnobMode mode);

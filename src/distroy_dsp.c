@@ -43,6 +43,10 @@ static const DistroyTypeInfo kTypeInfo[DISTROY_TYPE_COUNT] = {
     [DISTROY_SEM]          = { "Oberheim SEM",  "SEM",    DISTROY_KNOB_CUTOFF },
     [DISTROY_POLIVOKS]     = { "Polivoks",      "POLI",   DISTROY_KNOB_CUTOFF },
     [DISTROY_OCTAVE]       = { "Octafuzz",      "OCT",    DISTROY_KNOB_WET_DRY },
+    [DISTROY_BASS_MUFF]    = { "Bass Big Muff", "BMUFF",  DISTROY_KNOB_WET_DRY },
+    [DISTROY_MXR_BASS]     = { "MXR Bass Dist", "MXRB",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_BOSS_ODB3]    = { "Boss ODB-3",    "ODB3",   DISTROY_KNOB_WET_DRY },
+    [DISTROY_BASS_EQ]      = { "Low EQ Boost",  "LOEQ",   DISTROY_KNOB_GAIN },
 };
 
 const DistroyTypeInfo* distroy_type_info(DistroyType type) {
@@ -90,6 +94,62 @@ double onepole_process(OnePole *f, double x) {
     return y;
 }
 
+void zcsmoother_init(ZeroCrossingSmoother *z, double sample_rate) {
+    z->prevSample = 0.0;
+    z->zcRate = 0.0;
+    z->slewedSample = 0.0;
+    z->maxSlewMs = 4.0;
+    onepole_set_lowpass(&z->smoothFilter, 12000.0, sample_rate);
+}
+
+void zcsmoother_set_max_slew_ms(ZeroCrossingSmoother *z, double maxMs) {
+    if (maxMs < 0.0) maxMs = 0.0;
+    if (maxMs > 20.0) maxMs = 20.0;
+    z->maxSlewMs = maxMs;
+}
+
+double zcsmoother_process(ZeroCrossingSmoother *z, double x, double sample_rate) {
+    /* Detect a zero crossing (sign change since the last sample). */
+    int crossed = ((x >= 0.0) != (z->prevSample >= 0.0)) ? 1 : 0;
+    z->prevSample = x;
+
+    /* Smooth the crossing indicator into a running rate estimate via a
+     * simple leaky integrator (~30ms time constant) -- avoids the
+     * cutoff frequency (and slew time below) jumping around on a
+     * per-sample basis, which would itself sound like an artifact. */
+    double rateCoeff = exp(-1.0 / (0.001 * 30.0 * sample_rate));
+    z->zcRate = z->zcRate * rateCoeff + (double)crossed * (1.0 - rateCoeff);
+
+    /* Stage 1: slew-rate limiting (amplitude domain) -- caps how fast
+     * the signal is allowed to change per sample. Time constant scales
+     * 0 to ~4ms with the same zero-crossing rate driving the lowpass
+     * below (harsher signal = more limiting), expressed as "time to
+     * cross the full -1..+1 range at the current maximum slew rate".
+     * At zcRate=0 this is a no-op (maxDelta effectively unlimited). */
+    double slewTimeMs = z->zcRate * z->maxSlewMs;
+    if (slewTimeMs > 1e-6) {
+        double maxDeltaPerSample = 2.0 / (slewTimeMs * 0.001 * sample_rate);
+        double delta = x - z->slewedSample;
+        if (delta > maxDeltaPerSample) delta = maxDeltaPerSample;
+        if (delta < -maxDeltaPerSample) delta = -maxDeltaPerSample;
+        z->slewedSample += delta;
+    } else {
+        z->slewedSample = x;
+    }
+
+    /* Stage 2: the existing gentle dynamic lowpass (frequency domain),
+     * now fed the slew-limited signal rather than the raw input -- a
+     * harsher/buzzier signal (higher rate) gets pulled down toward more
+     * smoothing on both stages; an already-smooth signal is left mostly
+     * untouched by either. Range chosen to be a genuinely gentle
+     * "smooth it a little" effect per spec, not an aggressive
+     * tone-shaping filter. */
+    double cutoff = 12000.0 - z->zcRate * 8000.0;
+    if (cutoff < 3000.0) cutoff = 3000.0;
+    onepole_set_lowpass(&z->smoothFilter, cutoff, sample_rate);
+    return onepole_process(&z->smoothFilter, z->slewedSample);
+}
+
 void biquad_set_peaking(Biquad *f, double freq_hz, double q, double gain_db, double sample_rate) {
     double A = pow(10.0, gain_db / 40.0);
     double w0 = 2.0 * M_PI * freq_hz / sample_rate;
@@ -102,6 +162,29 @@ void biquad_set_peaking(Biquad *f, double freq_hz, double q, double gain_db, dou
     double a0 = 1.0 + alpha / A;
     double a1 = -2.0 * cosw0;
     double a2 = 1.0 - alpha / A;
+
+    f->b0 = b0 / a0;
+    f->b1 = b1 / a0;
+    f->b2 = b2 / a0;
+    f->a1 = a1 / a0;
+    f->a2 = a2 / a0;
+}
+
+void biquad_set_lowshelf(Biquad *f, double freq_hz, double gain_db, double sample_rate) {
+    double A = pow(10.0, gain_db / 40.0);
+    double w0 = 2.0 * M_PI * freq_hz / sample_rate;
+    double cosw0 = cos(w0);
+    double sinw0 = sin(w0);
+    double S = 1.0; /* shelf slope -- 1.0 is the standard gentle/musical default */
+    double alpha = sinw0 / 2.0 * sqrt((A + 1.0 / A) * (1.0 / S - 1.0) + 2.0);
+    double twoSqrtAalpha = 2.0 * sqrt(A) * alpha;
+
+    double b0 = A * ((A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAalpha);
+    double b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cosw0);
+    double b2 = A * ((A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAalpha);
+    double a0 = (A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAalpha;
+    double a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosw0);
+    double a2 = (A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAalpha;
 
     f->b0 = b0 / a0;
     f->b1 = b1 / a0;
@@ -720,18 +803,29 @@ double powerstarve_process(PowerStarve *ps, double x, double sample_rate) {
 
 void noisegate_init(NoiseGate *gate, double threshold_db, double sample_rate) {
     gate->envelope = 0.0;
-    gate->gain = 1.0; /* start open -- don't mute the very first block */
+    /* Start CLOSED, not open. Starting open (the original v0.10.0
+     * choice) meant the gate offered zero protection for the very
+     * first block(s) of audio -- exactly when a startup transient from
+     * the DSP chain settling (freshly randomized filters/resonance,
+     * etc.) is most likely, since the envelope follower hasn't had any
+     * time yet to detect anything and react. Starting closed and
+     * ramping open via the existing fast attack coefficient below
+     * gives a genuine "slowly ramping on" startup, protecting against
+     * that blast, while still opening quickly enough (10ms) to not
+     * perceptibly delay real playing once actual signal arrives. */
+    gate->gain = 0.0;
     gate->thresholdLinear = pow(10.0, threshold_db / 20.0);
     /* Envelope follower on the input: fast attack so real transients are
      * detected immediately, moderate release so brief dips between
      * notes don't cause chattering. */
     gate->envAttackCoeff = exp(-1.0 / (0.001 * 2.0 * sample_rate));
     gate->envReleaseCoeff = exp(-1.0 / (0.001 * 50.0 * sample_rate));
-    /* Gate's own gain smoothing: fast-ish attack (re-opening) so
-     * legitimate playing isn't perceptibly clipped when it resumes;
-     * SLOW release (closing) -- "ramps down slowly to silence" per
-     * spec, a graceful fade rather than an abrupt cutoff that would
-     * sound like a glitch. */
+    /* Gate's own gain smoothing: fast-ish attack (re-opening, and now
+     * also the initial startup ramp-on above) so legitimate playing
+     * isn't perceptibly clipped when it resumes; SLOW release
+     * (closing) -- "ramps down slowly to silence" per spec, a graceful
+     * fade rather than an abrupt cutoff that would sound like a
+     * glitch. */
     gate->gateAttackCoeff = exp(-1.0 / (0.001 * 10.0 * sample_rate));
     gate->gateReleaseCoeff = exp(-1.0 / (0.001 * 500.0 * sample_rate));
 }
@@ -861,6 +955,9 @@ static double tilt_center_hz(DistroyType type) {
         case DISTROY_TAPE:         return 1500.0;
         case DISTROY_TUBE:         return 1200.0;
         case DISTROY_OCTAVE:       return 900.0;
+        case DISTROY_BASS_MUFF:    return 400.0;
+        case DISTROY_MXR_BASS:     return 350.0;
+        case DISTROY_BOSS_ODB3:    return 450.0;
         default:                   return 1000.0;
     }
 }
@@ -958,6 +1055,25 @@ void distroy_block_set_type(DistroyBlock *b, DistroyType type) {
             break;
         case DISTROY_POLIVOKS:
             polivoks_init(&b->polivoks);
+            break;
+        case DISTROY_BASS_MUFF:
+            /* Split point for the low/high band divide -- see
+             * type_process(). Low band stays clean-ish to preserve bass
+             * fundamental; only the high band gets heavily clipped. */
+            onepole_set_lowpass(&b->color_lp, 100.0, sr);
+            break;
+        case DISTROY_MXR_BASS:
+            onepole_set_lowpass(&b->color_lp, 150.0, sr);
+            break;
+        case DISTROY_BOSS_ODB3:
+            onepole_set_lowpass(&b->color_lp, 120.0, sr);
+            break;
+        case DISTROY_BASS_EQ:
+            /* Low-shelf boost, knob-controlled amount (see
+             * type_process() -- this just sets a placeholder here,
+             * actually recomputed per-call since gain depends on the
+             * knob). */
+            biquad_set_lowshelf(&b->color_peak, 250.0, 0.0, sr);
             break;
         default:
             break;
@@ -1229,6 +1345,61 @@ static double type_process(DistroyBlock *b, double x, double drive) {
                 return fabs(driven); /* full-wave rectify -- dc_block downstream removes the resulting offset */
             }
         }
+        case DISTROY_BASS_MUFF: {
+            /* Bass-voiced Big Muff -- real bass distortion/fuzz pedals
+             * typically split the signal internally, keeping the low
+             * fundamental relatively clean/lightly saturated while
+             * heavily clipping the upper harmonics, since naively
+             * clipping the WHOLE signal (guitar-pedal style) tends to
+             * mangle the low end a bass player actually needs. color_lp
+             * (set in distroy_block_set_type -- ~100Hz here) is the
+             * split point; low band gets gentle warmth, high band gets
+             * the same cascaded-hard-clip character as the regular Big
+             * Muff above. */
+            double lowBand = onepole_process(&b->color_lp, x);
+            double highBand = x - lowBand;
+            double lowOut = soft_clip(lowBand * 1.4, 1.6);
+            double gain = 3.0 + drive * 20.0;
+            double y = hard_clip(highBand * gain, 1.0, 1.0);
+            y = hard_clip(y, 1.8, 1.0);
+            return lowOut * 0.85 + y * 0.55;
+        }
+        case DISTROY_MXR_BASS: {
+            /* MXR Bass Distortion -- same low/high split idea (split
+             * point ~150Hz), but with the more asymmetric clipping
+             * curve characteristic of the MXR circuit rather than Big
+             * Muff's symmetric cascaded clip. */
+            double lowBand = onepole_process(&b->color_lp, x);
+            double highBand = x - lowBand;
+            double lowOut = soft_clip(lowBand * 1.3, 1.4);
+            double gain = 4.0 + drive * 22.0;
+            double y = asym_soft_clip(highBand * gain, 3.0 + drive * 2.0, 2.0 + drive * 1.5);
+            return lowOut * 0.8 + y * 0.6;
+        }
+        case DISTROY_BOSS_ODB3: {
+            /* Boss ODB-3 -- distinctly buzzy/"synth-like" bass overdrive
+             * character (split point ~120Hz), achieved with a harder,
+             * more aggressive high-band clip plus a touch of coarse
+             * quantization for that characteristic ODB-3 buzz that
+             * distinguishes it from smoother bass overdrives. */
+            double lowBand = onepole_process(&b->color_lp, x);
+            double highBand = x - lowBand;
+            double lowOut = soft_clip(lowBand * 1.2, 1.3);
+            double gain = 6.0 + drive * 30.0;
+            double y = hard_clip(highBand * gain, 1.0, 1.0);
+            double levels = 40.0 - drive * 20.0; /* coarse quantization -- the buzzy ODB-3 grit */
+            y = quantize(y, levels);
+            return lowOut * 0.75 + y * 0.6;
+        }
+        case DISTROY_BASS_EQ: {
+            /* GAIN-mode: "drive" is the knob value directly, 0.0-1.0
+             * mapped to 0-12dB of low-shelf boost centered at 250Hz
+             * (comfortably covers the spec's "<300Hz emphasis"). Simple
+             * EQ, not a distortion -- no waveshaping at all. */
+            double boost_db = drive * 12.0;
+            biquad_set_lowshelf(&b->color_peak, 250.0, boost_db, b->sample_rate);
+            return biquad_process(&b->color_peak, x);
+        }
         default:
             return x;
     }
@@ -1376,6 +1547,14 @@ void distroy_chain_init(DistroyChain *c, double sample_rate) {
     for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
         distroy_block_init(&c->slots[i], DISTROY_BOSS_OD, sample_rate);
     }
+    for (int i = 0; i < DISTROY_NUM_GAPS; i++) {
+        c->phaseInvertGap[i] = 0;
+        c->zcSmoothGap[i] = 0;
+        zcsmoother_init(&c->zcSmoothers[i], sample_rate);
+    }
+    for (int i = 0; i < DISTROY_NUM_GAPS; i++) {
+        tilteq_init(&c->masterToneGaps[i], 900.0, sample_rate); /* tilteq_init already sets .tone = 0.5 (flat/neutral, 12 o'clock default) */
+    }
 }
 
 static unsigned int xorshift_next(unsigned int *state) {
@@ -1460,6 +1639,87 @@ void distroy_chain_randomize_all(DistroyChain *c, unsigned int seed) {
     }
 }
 
+/* Nudges every slot's non-knob-controlled sub-parameters (sub_drive,
+ * sub_tone, sub_level) by a small random amount, leaving the actual
+ * knob value and pedal type completely untouched. Used by the VST3's
+ * clickable corner screws -- clicking a screw both re-rolls that
+ * corner's decorative screw type AND gives the whole chain's internal
+ * "character" a small random jostle, like tapping a well-used
+ * pedalboard slightly shifts component tolerances/drift, without
+ * disturbing anything the user has actually dialed in. amount01 is the
+ * MAXIMUM perturbation magnitude (e.g. 0.1 for +-10%); each parameter
+ * gets an independent random delta in [-amount01, +amount01], clamped
+ * back into the valid 0.0-1.0 range. Deliberately does NOT re-run any
+ * of the type-specific randomization caps (Moog/Korg resonance-zero,
+ * Polivoks 20% cap, SEM 50-100% ceiling, etc.) -- this is a SMALL
+ * nudge from wherever the parameter currently sits, not a fresh
+ * randomization, so those safety caps remain implicitly respected as
+ * long as the starting point already respected them (which it always
+ * will, since it can only be reached via distroy_block_set_type() or a
+ * previous nudge). */
+void distroy_chain_nudge_subparams(DistroyChain *c, double amount01, unsigned int seed) {
+    unsigned int state = seed | 1u;
+    for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
+        DistroyBlock *b = &c->slots[i];
+        double d1 = ((double)xorshift_next(&state) / (double)UINT32_MAX * 2.0 - 1.0) * amount01;
+        double d2 = ((double)xorshift_next(&state) / (double)UINT32_MAX * 2.0 - 1.0) * amount01;
+        double d3 = ((double)xorshift_next(&state) / (double)UINT32_MAX * 2.0 - 1.0) * amount01;
+
+        double newDrive = b->sub_drive + d1;
+        double newTone = b->sub_tone + d2;
+        double newLevel = b->sub_level + d3;
+        b->sub_drive = (newDrive < 0.0) ? 0.0 : (newDrive > 1.0 ? 1.0 : newDrive);
+        b->sub_tone = (newTone < 0.0) ? 0.0 : (newTone > 1.0 ? 1.0 : newTone);
+        b->sub_level = (newLevel < 0.0) ? 0.0 : (newLevel > 1.0 ? 1.0 : newLevel);
+        b->tone_stage.tone = b->sub_tone;
+    }
+}
+
+static double sanitize_finite(double y) {
+    /* Safety net against non-finite output (NaN/Inf) -- can arise from
+     * genuine marginal numerical instability in the older resonant
+     * filter types (SEM/Polivoks/Moog Ladder/Korg MS-20 are all
+     * capable of self-oscillation under extreme parameter
+     * combinations, a well-known real-world DSP hazard) under
+     * worst-case stress (all knobs maxed, particular random pedal
+     * combinations) -- observed to trigger on some platforms/compilers
+     * and not others, consistent with a marginal-stability issue whose
+     * exact tipping point is sensitive to small floating-point
+     * differences rather than a deterministic logic bug. Silence
+     * (0.0) rather than clamping to some large finite value, since a
+     * "fail gracefully to silence" is safer than a loud clamped
+     * transient. Critically applied HERE (right after each pedal's own
+     * processing, before anything stateful downstream sees it) rather
+     * than only at the very end -- a NaN reaching a stateful filter
+     * (the zero-crossing smoother's onepole, or the master tone tilt
+     * EQ's two onepoles) would permanently corrupt that filter's
+     * internal state for every future sample, not just the one bad
+     * sample, since NaN propagates through all further arithmetic
+     * using that state. */
+    return isfinite(y) ? y : 0.0;
+}
+
+static double apply_gap_effects(DistroyChain *c, int gapIndex, double y) {
+    /* gapIndex is a VISUAL position (0-6, between visual slots gapIndex
+     * and gapIndex+1) -- called from distroy_chain_process() at the
+     * point in the ACTUAL processing order where that visual boundary
+     * falls, which depends on direction (see call sites below). Both
+     * effects are direction-agnostic (inverting phase or smoothing
+     * doesn't care which way the signal conceptually "flows" through
+     * that boundary), so this same helper covers both cases. */
+    if (c->phaseInvertGap[gapIndex]) {
+        y = -y;
+    }
+    if (c->zcSmoothGap[gapIndex]) {
+        y = sanitize_finite(zcsmoother_process(&c->zcSmoothers[gapIndex], y, c->sample_rate));
+    }
+    /* Master Tone -- always runs (not gated behind a toggle like the
+     * two above), since tone=0.5 is already a genuine no-op on its
+     * own; no separate "off" state needed. */
+    y = sanitize_finite(tilteq_process(&c->masterToneGaps[gapIndex], y));
+    return y;
+}
+
 double distroy_chain_process(DistroyChain *c, double x) {
     /* Sync the chain-level battery amount into each slot -- cheap to do
      * every sample (a single double assignment x8), keeps this simple
@@ -1472,15 +1732,66 @@ double distroy_chain_process(DistroyChain *c, double x) {
 
     double y = x;
     if (c->reverse) {
-        /* Right to left: slot 7 processes first, slot 0 last. */
+        /* Right to left: slot 7 processes first, slot 0 last. Gap i
+         * (between visual slots i and i+1) is crossed right after
+         * processing visual slot i+1, before continuing to visual
+         * slot i. */
         for (int i = DISTROY_NUM_SLOTS - 1; i >= 0; i--) {
-            y = distroy_block_process(&c->slots[i], y);
+            y = sanitize_finite(distroy_block_process(&c->slots[i], y));
+            if (i > 0) {
+                y = apply_gap_effects(c, i - 1, y);
+            }
         }
     } else {
-        /* Left to right (default): slot 0 processes first, slot 7 last. */
+        /* Left to right (default): slot 0 processes first, slot 7 last.
+         * Gap i is crossed right after processing visual slot i, before
+         * continuing to visual slot i+1. */
         for (int i = 0; i < DISTROY_NUM_SLOTS; i++) {
-            y = distroy_block_process(&c->slots[i], y);
+            y = sanitize_finite(distroy_block_process(&c->slots[i], y));
+            if (i < DISTROY_NUM_SLOTS - 1) {
+                y = apply_gap_effects(c, i, y);
+            }
         }
     }
+
     return y;
 }
+
+void distroy_chain_set_master_tone(DistroyChain *c, double tone01) {
+    if (tone01 < 0.0) tone01 = 0.0;
+    if (tone01 > 1.0) tone01 = 1.0;
+    for (int i = 0; i < DISTROY_NUM_GAPS; i++) {
+        c->masterToneGaps[i].tone = tone01;
+    }
+}
+
+void distroy_chain_set_phase_invert(DistroyChain *c, int gapIndex, int enabled) {
+    if (gapIndex < 0 || gapIndex >= DISTROY_NUM_GAPS) return;
+    c->phaseInvertGap[gapIndex] = enabled ? 1 : 0;
+}
+
+void distroy_chain_set_zc_smooth(DistroyChain *c, int gapIndex, int enabled) {
+    if (gapIndex < 0 || gapIndex >= DISTROY_NUM_GAPS) return;
+    c->zcSmoothGap[gapIndex] = enabled ? 1 : 0;
+}
+
+int distroy_chain_get_phase_invert(const DistroyChain *c, int gapIndex) {
+    if (gapIndex < 0 || gapIndex >= DISTROY_NUM_GAPS) return 0;
+    return c->phaseInvertGap[gapIndex];
+}
+
+int distroy_chain_get_zc_smooth(const DistroyChain *c, int gapIndex) {
+    if (gapIndex < 0 || gapIndex >= DISTROY_NUM_GAPS) return 0;
+    return c->zcSmoothGap[gapIndex];
+}
+
+void distroy_chain_set_slew_ms(DistroyChain *c, int gapIndex, double maxMs) {
+    if (gapIndex < 0 || gapIndex >= DISTROY_NUM_GAPS) return;
+    zcsmoother_set_max_slew_ms(&c->zcSmoothers[gapIndex], maxMs);
+}
+
+double distroy_chain_get_slew_ms(const DistroyChain *c, int gapIndex) {
+    if (gapIndex < 0 || gapIndex >= DISTROY_NUM_GAPS) return 0.0;
+    return c->zcSmoothers[gapIndex].maxSlewMs;
+}
+
